@@ -20,7 +20,14 @@ class Settings(BaseSettings):
     pixabay_api_key: str = Field(default="", repr=False)
     unsplash_access_key: str = Field(default="", repr=False)
 
-    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ]
 
     model_config = SettingsConfigDict(
         env_file=".env",
