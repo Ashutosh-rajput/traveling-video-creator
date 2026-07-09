@@ -6,9 +6,15 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.core.config import Settings, settings
 from app.schemas.chat import ChatRequest, ChatResponse
+from app.services.media_tools import get_media_tools
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a concise, helpful travel planning assistant. "
+    "When a user asks for pictures, photos, videos, stock footage, media, or visual assets "
+    "for a destination or place name, use the available media search tools. "
+    "Prefer Pexels when photos and videos are both needed, use Pixabay as a free alternative, "
+    "and use Unsplash for high-quality destination photos. "
+    "Return direct media links, source page links, creator credits, and provider attribution. "
     "Ask for missing constraints when they are necessary, and otherwise provide practical answers."
 )
 
@@ -33,12 +39,16 @@ class AgentService:
     def _build_agent(self, system_prompt: str) -> Any:
         return create_agent(
             model=self._build_llm(),
-            tools=[],
+            tools=get_media_tools(),
             system_prompt=system_prompt,
         )
 
     async def invoke(self, payload: ChatRequest) -> ChatResponse:
-        prompt = payload.system_prompt or DEFAULT_SYSTEM_PROMPT
+        prompt = (
+            f"{DEFAULT_SYSTEM_PROMPT}\n\nAdditional caller instructions: {payload.system_prompt}"
+            if payload.system_prompt
+            else DEFAULT_SYSTEM_PROMPT
+        )
         if prompt == DEFAULT_SYSTEM_PROMPT:
             if self._agent is None:
                 self._agent = self._build_agent(DEFAULT_SYSTEM_PROMPT)
