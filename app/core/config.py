@@ -13,12 +13,19 @@ class Settings(BaseSettings):
     google_api_key: str = Field(default="", repr=False)
     gemma_model: str = "gemma-4-31b-it"
     llm_temperature: float = 0.2
-    llm_max_output_tokens: int = 1024
-    request_timeout_seconds: int = 60
+    llm_max_output_tokens: int = 4096
+    request_timeout_seconds: int = 120
 
     pexels_api_key: str = Field(default="", repr=False)
     pixabay_api_key: str = Field(default="", repr=False)
     unsplash_access_key: str = Field(default="", repr=False)
+
+    sarvam_api_key: str = Field(default="", repr=False)
+    sarvam_lang: str = "en-IN"
+    sarvam_pace: float = 1.2
+    sarvam_sample_rate: int = 24000
+    sarvam_speaker: str = "shubh"
+    sarvam_model: str = "bulbul:v3"
 
     cors_origins: list[str] = [
         "http://localhost:3000",

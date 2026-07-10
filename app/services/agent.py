@@ -7,26 +7,105 @@ from langchain_core.messages import ToolMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.core.config import Settings, settings
-from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset, ToolCallData
+from app.schemas.chat import AgentOutput, ChatRequest, ChatResponse, MediaAsset, ToolCallData
 from app.services.media_tools import get_media_tools
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are an expert travel guide assistant and creative video scriptwriter. "
+    "You are a professional travel video producer, scriptwriter, and guide. "
     "When a user asks about a city, area, or destination, you MUST identify exactly 6 to 7 top attractions "
     "or interesting places to visit in that city/area. "
     "For each of these 6 to 7 attractions, you MUST use the available media search tools to search for "
     "photos and videos (e.g. search_pexels_place_media, search_pixabay_place_media, or search_unsplash_place_photos). "
     "Search specifically for each attraction by its name to gather photos and videos. "
-    "In your final response message, list and describe these 6 to 7 attractions clearly using markdown. "
-    "Note: Do NOT output or write any image or video URLs in your final response body, as the system will extract them automatically. "
-    "CRITICAL REQUIREMENT: At the very end of your response, you MUST write an engaging, detailed, and descriptive "
-    "video narration script (around 150 to 250 words) enclosed in <video_script> and </video_script> tags. "
-    "The script should tell a compelling story of how to spend a perfect day in this city/area. "
-    "Structure the narration sequentially: start the morning at a primary attraction, transition to "
-    "afternoon sightseeing, highlight scenic views or cultural experiences to enjoy next, and wrap up "
-    "the day with a relaxing evening activity or sunset spot. Use descriptive sensory language to make the script "
-    "feel like a high-quality travel vlog narration."
+    "Your response must focus primarily on producing a detailed, full-length, professional video voiceover script. "
+    "Populate the structured output schema with the following fields:\n"
+    "- message: A brief 1-2 paragraph description/summary introduction of the city/area. Do NOT list/describe the attractions here.\n"
+    "- video_script: A detailed, highly engaging video voiceover script (about 250 words) describing a travel itinerary "
+    "or vlog walkthrough of the city.\n"
+    "  CRITICAL SCRIPT RULES:\n"
+    "  1. Before each attraction's narration, insert a marker tag on its own line in the format: [attraction: Exact Attraction Name]\n"
+    "     The very first line of the script should also start with the first attraction marker.\n"
+    "     Example format:\n"
+    "     [attraction: Lalbagh Botanical Garden]\n"
+    "     We start our morning at the stunning Lalbagh Botanical Garden! The fresh morning air...\n"
+    "     [attraction: Bangalore Palace]\n"
+    "     Now, let us step into royalty at the magnificent Bangalore Palace...\n"
+    "  2. Do NOT include any other director instructions, camera angles, sound effects, or scene transitions "
+    "  in brackets or parentheses (e.g., do NOT output '[Opening Shot: ...]', '[Cut to: ...]', '(Morning)'). "
+    "  The ONLY brackets allowed are the [attraction: ...] markers. Only output the actual spoken dialogue narration.\n"
+    "  3. To achieve a highly expressive human tone and help the Text-to-Speech (TTS) engine speak with natural emotions and inflections, "
+    "  write using conversational phrases, warm tones, and expressive punctuation (like exclamation marks '!', pauses '...', and emphasis words).\n"
+    "- pics: A list of collected photo objects, where each object contains 'url' (from the src/large or image_url fields of tool results) and 'label' (name of the attraction).\n"
+    "- videos: A list of collected video objects, where each object contains 'url' (from the video_url or link fields of tool results) and 'label' (name of the attraction).\n"
+    "Note: Do NOT output or write any image or video URLs in your text response outside the structured fields, as the system will extract them automatically."
 )
+
+
+def repair_json_string(s: str) -> str:
+    s = s.strip()
+    if not s:
+        return s
+
+    in_quote = False
+    escaped = False
+    for char in s:
+        if char == '\\':
+            escaped = not escaped
+        elif char == '"':
+            if not escaped:
+                in_quote = not in_quote
+            escaped = False
+        else:
+            escaped = False
+
+    if in_quote:
+        s += '"'
+
+    open_braces = 0
+    open_brackets = 0
+    in_quote = False
+    escaped = False
+    for char in s:
+        if char == '\\':
+            escaped = not escaped
+        elif char == '"':
+            if not escaped:
+                in_quote = not in_quote
+            escaped = False
+        elif not in_quote:
+            if char == '{':
+                open_braces += 1
+            elif char == '}':
+                open_braces = max(0, open_braces - 1)
+            elif char == '[':
+                open_brackets += 1
+            elif char == ']':
+                open_brackets = max(0, open_brackets - 1)
+            escaped = False
+        else:
+            escaped = False
+
+    s += ']' * open_brackets
+    s += '}' * open_braces
+    return s
+
+
+def merge_media(existing_list: list[MediaAsset], new_data: Any) -> list[MediaAsset]:
+    seen_urls = {item.url for item in existing_list}
+    if isinstance(new_data, list):
+        for item in new_data:
+            url = None
+            label = ""
+            if isinstance(item, dict):
+                url = item.get("url")
+                label = item.get("label") or ""
+            elif hasattr(item, "url"):
+                url = getattr(item, "url")
+                label = getattr(item, "label", "") or ""
+            if url and url not in seen_urls:
+                existing_list.append(MediaAsset(url=url, label=label))
+                seen_urls.add(url)
+    return existing_list
 
 
 class AgentService:
@@ -115,45 +194,99 @@ class AgentService:
                             tool_output=msg.content
                         ))
 
-        # Extract answer/explanation from last AIMessage
+        # Extract message and video_script
         answer = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) or getattr(msg, "type", None) == "ai":
-                content = msg.content
-                if isinstance(content, list):
-                    text_blocks = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_blocks.append(block.get("text", ""))
-                        elif isinstance(block, str):
-                            text_blocks.append(block)
-                    answer = "\n".join(text_blocks)
-                else:
-                    answer = str(content)
-                break
-
-        if not answer and messages:
-            last_message = messages[-1]
-            answer = getattr(last_message, "content", str(last_message))
-
         video_script = ""
-        lower_answer = answer.lower()
-        tag_start = lower_answer.find("<video_script>")
-        if tag_start != -1:
+        structured = result.get("structured_response")
+
+        if structured:
+            if hasattr(structured, "message"):
+                answer = structured.message
+            elif isinstance(structured, dict) and "message" in structured:
+                answer = structured["message"]
+
+            if hasattr(structured, "video_script"):
+                video_script = structured.video_script
+            elif isinstance(structured, dict) and "video_script" in structured:
+                video_script = structured["video_script"]
+
+            if hasattr(structured, "pics"):
+                merge_media(pics, structured.pics)
+            elif isinstance(structured, dict) and "pics" in structured:
+                merge_media(pics, structured["pics"])
+
+            if hasattr(structured, "videos"):
+                merge_media(videos, structured.videos)
+            elif isinstance(structured, dict) and "videos" in structured:
+                merge_media(videos, structured["videos"])
+
+        # Fallback to tag/JSON parsing if structured response is missing
+        if not answer:
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) or getattr(msg, "type", None) == "ai":
+                    content = msg.content
+                    if isinstance(content, list):
+                        text_blocks = []
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text_blocks.append(block.get("text", ""))
+                            elif isinstance(block, str):
+                                text_blocks.append(block)
+                        answer = "\n".join(text_blocks)
+                    else:
+                        answer = str(content)
+                    break
+
+            if not answer and messages:
+                last_message = messages[-1]
+                answer = getattr(last_message, "content", str(last_message))
+
+            # 1. Try parsing answer as raw JSON or markdown-wrapped JSON
+            clean_answer = answer.strip()
+            if clean_answer.startswith("```"):
+                lines = clean_answer.split("\n")
+                if lines[0].strip().startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                clean_answer = "\n".join(lines).strip()
+
+            parsed_json = None
             try:
-                msg_body = answer[:tag_start].strip()
-                rest = answer[tag_start + len("<video_script>"):]
-                tag_end = rest.lower().find("</video_script>")
-                if tag_end != -1:
-                    video_script = rest[:tag_end].strip()
-                    after_tag = rest[tag_end + len("</video_script>"):]
-                    if after_tag.strip():
-                        msg_body += "\n" + after_tag.strip()
-                else:
-                    video_script = rest.strip()
-                answer = msg_body.strip()
+                parsed_json = json.loads(clean_answer)
             except Exception:
-                pass
+                try:
+                    repaired = repair_json_string(clean_answer)
+                    parsed_json = json.loads(repaired)
+                except Exception:
+                    pass
+
+            if isinstance(parsed_json, dict) and ("message" in parsed_json or "video_script" in parsed_json):
+                answer = parsed_json.get("message", "")
+                video_script = parsed_json.get("video_script", "")
+                if "pics" in parsed_json:
+                    merge_media(pics, parsed_json["pics"])
+                if "videos" in parsed_json:
+                    merge_media(videos, parsed_json["videos"])
+            else:
+                # 2. Try parsing out <video_script> tags
+                lower_answer = answer.lower()
+                tag_start = lower_answer.find("<video_script>")
+                if tag_start != -1:
+                    try:
+                        msg_body = answer[:tag_start].strip()
+                        rest = answer[tag_start + len("<video_script>"):]
+                        tag_end = rest.lower().find("</video_script>")
+                        if tag_end != -1:
+                            video_script = rest[:tag_end].strip()
+                            after_tag = rest[tag_end + len("</video_script>"):]
+                            if after_tag.strip():
+                                msg_body += "\n" + after_tag.strip()
+                        else:
+                            video_script = rest.strip()
+                        answer = msg_body.strip()
+                    except Exception:
+                        pass
 
         return ChatResponse(
             message=answer,

@@ -9,7 +9,12 @@ import {
   ExternalLink,
   ChevronRight,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Square,
+  Volume2,
+  Film,
+  Download,
+  Play
 } from 'lucide-react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
@@ -26,6 +31,16 @@ function App() {
   const [videos, setVideos] = useState([]);
   const [toolData, setToolData] = useState([]);
   const [videoScript, setVideoScript] = useState('');
+  const [ttsLoading, setTtsLoading] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [audioElement, setAudioElement] = useState(null);
+
+  // Video generation states
+  const [videoGenerating, setVideoGenerating] = useState(false);
+  const [videoProgress, setVideoProgress] = useState(0);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [videoError, setVideoError] = useState(null);
   
   // UI states
   const [debugMode, setDebugMode] = useState(false);
@@ -62,6 +77,14 @@ function App() {
     if (e) e.preventDefault();
     if (!searchQuery.trim()) return;
 
+    if (audioElement) {
+      audioElement.pause();
+    }
+    setAudioElement(null);
+    setAudioUrl(null);
+    setIsPlaying(false);
+    setTtsLoading(false);
+
     setLoading(true);
     setError(null);
     setMessage('');
@@ -69,6 +92,10 @@ function App() {
     setVideos([]);
     setToolData([]);
     setVideoScript('');
+    setVideoUrl(null);
+    setVideoError(null);
+    setVideoGenerating(false);
+    setVideoProgress(0);
 
     try {
       const response = await fetch('/api/v1/chat', {
@@ -107,6 +134,116 @@ function App() {
   const handleQuickSearch = (term) => {
     setQuery(term);
     handleSearch(null, term);
+  };
+
+  const handleTtsPlay = async () => {
+    if (isPlaying) {
+      if (audioElement) {
+        audioElement.pause();
+      }
+      setIsPlaying(false);
+      return;
+    }
+
+    if (audioUrl && audioElement) {
+      audioElement.play();
+      setIsPlaying(true);
+      return;
+    }
+
+    setTtsLoading(true);
+    try {
+      const res = await fetch('/api/v1/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: videoScript }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to generate narration audio.');
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      
+      audio.onended = () => {
+        setIsPlaying(false);
+      };
+      
+      audio.onerror = () => {
+        setIsPlaying(false);
+        setTtsLoading(false);
+        alert('Failed to play voiceover audio.');
+      };
+
+      setAudioUrl(url);
+      setAudioElement(audio);
+      audio.play();
+      setIsPlaying(true);
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Failed to generate voiceover. Make sure SARVAM_API_KEY is configured in .env.');
+    } finally {
+      setTtsLoading(false);
+    }
+  };
+
+  // Video generation progress simulation stages
+  const videoStages = [
+    "Parsing script segments...",
+    "Generating voiceover audio...",
+    "Downloading media assets...",
+    "Compiling video timeline...",
+    "Rendering final video..."
+  ];
+
+  const handleGenerateVideo = async () => {
+    setVideoGenerating(true);
+    setVideoError(null);
+    setVideoUrl(null);
+    setVideoProgress(0);
+
+    // Progress simulation timer
+    const progressInterval = setInterval(() => {
+      setVideoProgress((prev) => {
+        if (prev < videoStages.length - 1) return prev + 1;
+        return prev;
+      });
+    }, 8000);
+
+    try {
+      const res = await fetch('/api/v1/chat/generate-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          script: videoScript,
+          pics: pics.map(p => ({ url: p.url, label: p.label })),
+          videos: videos.map(v => ({ url: v.url, label: v.label })),
+        }),
+      });
+
+      clearInterval(progressInterval);
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Video generation failed.');
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setVideoUrl(url);
+      setVideoProgress(videoStages.length - 1);
+    } catch (err) {
+      clearInterval(progressInterval);
+      console.error(err);
+      setVideoError(err.message || 'Video generation failed.');
+    } finally {
+      setVideoGenerating(false);
+    }
   };
 
   return (
@@ -251,16 +388,186 @@ function App() {
           {/* Suggested Video Narration Script */}
           {!loading && videoScript && (
             <div className="glass-card animate-fade-in" style={{ padding: '24px', marginTop: '20px', borderLeft: '4px solid var(--accent-indigo)', background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(3, 7, 18, 0.4) 100%)' }}>
-              <div className="agent-header" style={{ marginBottom: '12px' }}>
-                <div className="agent-avatar" style={{ background: 'rgba(99, 102, 241, 0.15)', color: 'var(--accent-indigo)' }}>
-                  <VideoIcon size={20} />
+              <div className="agent-header" style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div className="agent-avatar" style={{ background: 'rgba(99, 102, 241, 0.15)', color: 'var(--accent-indigo)' }}>
+                    <VideoIcon size={20} />
+                  </div>
+                  <div className="agent-name" style={{ fontWeight: '700', letterSpacing: '0.025em', textTransform: 'uppercase', fontSize: '0.8rem', color: '#a5b4fc' }}>
+                    Suggested Video Script Narration
+                  </div>
                 </div>
-                <div className="agent-name" style={{ fontWeight: '700', letterSpacing: '0.025em', textTransform: 'uppercase', fontSize: '0.8rem', color: '#a5b4fc' }}>
-                  🎥 Suggested Video Script Narration
-                </div>
+                
+                <button
+                  type="button"
+                  onClick={handleTtsPlay}
+                  disabled={ttsLoading}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '0.85rem',
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    border: '1px solid rgba(165, 180, 252, 0.3)',
+                    background: isPlaying ? 'rgba(239, 68, 68, 0.1)' : 'rgba(99, 102, 241, 0.1)',
+                    color: isPlaying ? '#f87171' : '#a5b4fc',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    fontWeight: '600'
+                  }}
+                >
+                  {ttsLoading ? (
+                    <>
+                      <Loader2 size={14} className="stage-spinner" />
+                      <span>Generating Speech...</span>
+                    </>
+                  ) : isPlaying ? (
+                    <>
+                      <Square size={14} fill="#f87171" style={{ stroke: 'none' }} />
+                      <span>Stop Voiceover</span>
+                    </>
+                  ) : (
+                    <>
+                      <Volume2 size={14} />
+                      <span>Listen to Narration</span>
+                    </>
+                  )}
+                </button>
               </div>
               <div style={{ fontFamily: 'var(--font-outfit)', fontSize: '1.05rem', color: '#e2e8f0', lineHeight: '1.7', fontStyle: 'italic', paddingLeft: '8px', whiteSpace: 'pre-line' }}>
                 {videoScript}
+              </div>
+
+              {/* Generate Video Button */}
+              <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={handleGenerateVideo}
+                  disabled={videoGenerating}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    fontSize: '0.95rem',
+                    padding: '10px 22px',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(99, 102, 241, 0.4)',
+                    background: videoGenerating
+                      ? 'rgba(99, 102, 241, 0.05)'
+                      : 'linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(168, 85, 247, 0.15) 100%)',
+                    color: '#a5b4fc',
+                    cursor: videoGenerating ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.3s',
+                    fontWeight: '700',
+                    letterSpacing: '0.02em'
+                  }}
+                >
+                  {videoGenerating ? (
+                    <>
+                      <Loader2 size={18} className="stage-spinner" />
+                      <span>Generating Travel Video...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Film size={18} />
+                      <span>Generate Travel Video</span>
+                    </>
+                  )}
+                </button>
+
+                {videoUrl && (
+                  <a
+                    href={videoUrl}
+                    download="travel_guide.mp4"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '0.85rem',
+                      padding: '8px 16px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(34, 197, 94, 0.3)',
+                      background: 'rgba(34, 197, 94, 0.1)',
+                      color: '#4ade80',
+                      textDecoration: 'none',
+                      fontWeight: '600',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <Download size={14} />
+                    <span>Download MP4</span>
+                  </a>
+                )}
+              </div>
+
+              {/* Video Generation Progress */}
+              {videoGenerating && (
+                <div style={{
+                  marginTop: '16px',
+                  padding: '16px',
+                  borderRadius: '10px',
+                  background: 'rgba(15, 23, 42, 0.4)',
+                  border: '1px solid var(--border-glass)'
+                }}>
+                  {videoStages.map((stage, idx) => (
+                    <div key={idx} className="stage-item" style={{ opacity: idx <= videoProgress ? 1 : 0.35, marginBottom: '6px' }}>
+                      {idx < videoProgress ? (
+                        <span className="stage-check">✓</span>
+                      ) : idx === videoProgress ? (
+                        <Loader2 size={14} className="stage-spinner" />
+                      ) : (
+                        <span style={{ width: '16px', display: 'inline-block', textAlign: 'center' }}>○</span>
+                      )}
+                      <span style={{ marginLeft: '8px', fontSize: '0.9rem', color: idx <= videoProgress ? '#e2e8f0' : '#64748b' }}>{stage}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Video Error */}
+              {videoError && (
+                <div style={{
+                  marginTop: '12px',
+                  padding: '12px 16px',
+                  borderRadius: '8px',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <AlertCircle size={18} style={{ color: '#f87171' }} />
+                  <span style={{ color: '#fca5a5', fontSize: '0.9rem' }}>{videoError}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Generated Video Player */}
+          {!loading && videoUrl && (
+            <div className="glass-card animate-fade-in" style={{
+              padding: '24px',
+              marginTop: '20px',
+              borderLeft: '4px solid #22c55e',
+              background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.05) 0%, rgba(3, 7, 18, 0.4) 100%)'
+            }}>
+              <div className="agent-header" style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div className="agent-avatar" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80' }}>
+                    <Play size={20} />
+                  </div>
+                  <div className="agent-name" style={{ fontWeight: '700', letterSpacing: '0.025em', textTransform: 'uppercase', fontSize: '0.8rem', color: '#86efac' }}>
+                    Your Travel Guide Video
+                  </div>
+                </div>
+              </div>
+              <div style={{ borderRadius: '12px', overflow: 'hidden', background: '#000' }}>
+                <video
+                  src={videoUrl}
+                  controls
+                  style={{ width: '100%', maxHeight: '600px', display: 'block' }}
+                />
               </div>
             </div>
           )}
