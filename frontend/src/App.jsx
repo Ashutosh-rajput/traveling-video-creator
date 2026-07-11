@@ -62,6 +62,7 @@ function App() {
   const [numPlaces, setNumPlaces] = useState(5);
   const [videoLength, setVideoLength] = useState('medium');
   const [aspectRatio, setAspectRatio] = useState('horizontal');
+  const [captionTheme, setCaptionTheme] = useState('Neon Yellow (Default)');
   
   // Canvas Active Workspace tab: 'video', 'script', 'gallery', 'logs'
   const [canvasTab, setCanvasTab] = useState('video');
@@ -98,6 +99,10 @@ function App() {
 
   const speakersList = [
     'Shubh', 'Aditya', 'Ritu', 'Priya', 'Neha', 'Rahul', 'Pooja', 'Rohan', 'Simran', 'Kavya', 'Amit', 'Dev', 'Ishita'
+  ];
+
+  const captionThemesList = [
+    'Neon Yellow (Default)', 'Cyberpunk Pink', 'Emerald Green', 'Simple White', 'Royal Gold', 'Retro Orange'
   ];
 
   // Stage timer simulation during loading
@@ -370,6 +375,7 @@ function App() {
           music_volume: musicVolume,
           transition_style: transitionStyle,
           transition_sound: transitionSound,
+          caption_theme: captionTheme,
         }),
       });
 
@@ -487,6 +493,30 @@ function App() {
                 >
                   {speakersList.map((spk) => (
                     <option key={spk} value={spk} style={{ background: '#0f172a' }}>{spk}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Caption Theme Selection */}
+              <div className="console-input-group">
+                <label className="console-input-label">Caption Style Theme</label>
+                <select 
+                  value={captionTheme} 
+                  onChange={(e) => setCaptionTheme(e.target.value)}
+                  disabled={loading}
+                  style={{
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    border: '1px solid var(--border-glass)',
+                    borderRadius: '8px',
+                    padding: '12px 14px',
+                    color: '#e2e8f0',
+                    fontSize: '0.95rem',
+                    outline: 'none',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {captionThemesList.map((theme) => (
+                    <option key={theme} value={theme} style={{ background: '#0f172a' }}>{theme}</option>
                   ))}
                 </select>
               </div>
@@ -797,7 +827,7 @@ function App() {
         <div className="canvas-panel animate-fade-in" style={{ animationDelay: '0.2s' }}>
           
           {/* Workspace Tabbing Headers */}
-          {(message || videoScript || pics.length > 0 || videos.length > 0 || loading) && (
+          {(message || videoScript || pics.length > 0 || videos.length > 0 || loading || videoUrl) && (
             <div className="canvas-tabs-header">
               <button 
                 className={`canvas-tab-btn ${canvasTab === 'video' ? 'active' : ''}`}
@@ -836,7 +866,7 @@ function App() {
           <div className="glass-card canvas-card">
             
             {/* 1. Empty Project Canvas State */}
-            {!loading && !message && !videoScript && pics.length === 0 && (
+            {!loading && !message && !videoScript && pics.length === 0 && !videoUrl && (
               <div className="canvas-empty-state">
                 <div className="canvas-empty-glow">
                   <Tv size={48} />
@@ -917,7 +947,7 @@ function App() {
             )}
 
             {/* 4. Active Tab: Video Compilation */}
-            {!loading && canvasTab === 'video' && (message || videoScript) && (
+            {!loading && canvasTab === 'video' && (message || videoScript || videoUrl) && (
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                 
                 {/* Generate Video Action Panel if not compiled yet */}
@@ -1114,26 +1144,32 @@ function App() {
                   pics.length > 0 ? (
                     <div className="media-grid">
                       {pics.map((item, index) => (
-                        <div 
-                          key={index} 
+                        <div
+                          key={index}
                           className="media-card"
                           onClick={() => setLightboxItem({ type: 'photo', url: item.url })}
                         >
-                          <img src={item.url} alt={item.label || `Photo ${index + 1}`} className="media-image" loading="lazy" />
-                          <div className="media-overlay" style={{ transform: 'none', background: 'linear-gradient(to top, rgba(3, 7, 18, 0.95) 0%, rgba(3, 7, 18, 0.3) 100%)' }}>
+                          <img
+                            src={item.url}
+                            alt={item.label || `Photo ${index + 1}`}
+                            className="media-image"
+                            loading="lazy"
+                          />
+                          <div className="media-overlay">
                             <div className="creator-info">
                               <span className="creator-name">{item.label}</span>
                               <span className="creator-attribution">High Res Image</span>
                             </div>
-                            <a 
-                              href={item.url} 
-                              target="_blank" 
-                              rel="noreferrer" 
+                            <button
+                              type="button"
                               className="download-link"
-                              onClick={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(item.url, '_blank', 'noopener,noreferrer');
+                              }}
                             >
-                              <ExternalLink size={14} />
-                            </a>
+                              <ExternalLink size={16} />
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -1151,38 +1187,43 @@ function App() {
                   videos.length > 0 ? (
                     <div className="media-grid">
                       {videos.map((item, index) => (
-                        <div 
-                          key={index} 
+                        <div
+                          key={index}
                           className="media-card"
                           onClick={() => setLightboxItem({ type: 'video', url: item.url })}
+                          onMouseEnter={(e) => {
+                            const v = e.currentTarget.querySelector('video');
+                            if (v) v.play().catch(() => {});
+                          }}
+                          onMouseLeave={(e) => {
+                            const v = e.currentTarget.querySelector('video');
+                            if (v) { v.pause(); v.currentTime = 0; }
+                          }}
                         >
-                          <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                            <video 
-                              src={item.url} 
-                              className="media-image" 
-                              muted 
-                              playsInline 
-                              onMouseOver={(e) => e.target.play()}
-                              onMouseOut={(e) => { e.target.pause(); e.target.currentTime = 0; }}
-                            />
-                            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', background: 'rgba(15, 23, 42, 0.7)', padding: '12px', borderRadius: '50%', color: '#fff', border: '1px solid rgba(255,255,255,0.1)' }}>
-                              <VideoIcon size={16} />
-                            </div>
+                          <video
+                            src={item.url}
+                            className="media-image"
+                            muted
+                            playsInline
+                          />
+                          <div className="center-play-icon" style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', background: 'rgba(15, 23, 42, 0.7)', padding: '12px', borderRadius: '50%', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', zIndex: 5, pointerEvents: 'none', transition: 'opacity 0.2s ease' }}>
+                            <VideoIcon size={16} />
                           </div>
-                          <div className="media-overlay" style={{ transform: 'none', background: 'linear-gradient(to top, rgba(3, 7, 18, 0.95) 0%, rgba(3, 7, 18, 0.3) 100%)' }}>
+                          <div className="media-overlay">
                             <div className="creator-info">
                               <span className="creator-name">{item.label}</span>
                               <span className="creator-attribution">Hover to play preview</span>
                             </div>
-                            <a 
-                              href={item.url} 
-                              target="_blank" 
-                              rel="noreferrer" 
+                            <button
+                              type="button"
                               className="download-link"
-                              onClick={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(item.url, '_blank', 'noopener,noreferrer');
+                              }}
                             >
-                              <ExternalLink size={14} />
-                            </a>
+                              <ExternalLink size={16} />
+                            </button>
                           </div>
                         </div>
                       ))}

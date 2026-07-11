@@ -336,6 +336,7 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
   transition: transform 0.3s ease;
 }
 
@@ -353,6 +354,18 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  will-change: opacity, transform;
+}
+
+.media-card:hover .media-overlay {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
 }
 
 .creator-info {
@@ -375,16 +388,35 @@
 .download-link {
   background: rgba(255, 255, 255, 0.1);
   color: var(--text-primary);
-  padding: 6px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: none;
+  cursor: pointer;
+  outline: none;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  transition: all 0.2s ease;
+  z-index: 12;
 }
 
 .download-link:hover {
   background: white;
   color: black;
+}
+
+.center-play-icon {
+  opacity: 1;
+  transition: all 0.2s ease;
+}
+
+.media-card:hover .center-play-icon {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.8) !important;
 }
 
 /* Lightbox Modal */

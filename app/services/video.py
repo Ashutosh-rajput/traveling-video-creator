@@ -29,6 +29,86 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.services.tts import generate_tts
 
+# ===========================================================================
+# CAPTION STYLE CONFIGURATION OPTIONS
+# ===========================================================================
+# You can customize the font family, colors, sizes, and styles of the subtitles here.
+# Change the active theme by passing the caption_theme parameter from the frontend.
+
+# Available Font Families (mapped below):
+# "Segoe UI", "Arial", "Trebuchet MS", "Georgia", "Impact", "Comic Sans"
+
+
+
+CAPTION_THEMES = {
+    "Neon Yellow (Default)": {
+        "font_family": "Segoe UI",
+        "font_size": 52,
+        "bold": True,
+        "base_color": (255, 255, 255, 255),       # White text
+        "highlight_color": (255, 210, 60, 255),   # Bright golden yellow highlight
+        "stroke_width": 4,
+        "stroke_color": (0, 0, 0, 255),          # Black outline
+        "shadow_offset": (3, 3),
+        "shadow_color": (0, 0, 0, 200),
+    },
+    "Cyberpunk Pink": {
+        "font_family": "Arial",
+        "font_size": 54,
+        "bold": True,
+        "base_color": (255, 255, 255, 255),
+        "highlight_color": (255, 0, 128, 255),    # Hot cyberpunk neon pink
+        "stroke_width": 5,
+        "stroke_color": (15, 23, 42, 255),        # Slate outline
+        "shadow_offset": (4, 4),
+        "shadow_color": (0, 0, 0, 180),
+    },
+    "Emerald Green": {
+        "font_family": "Trebuchet MS",
+        "font_size": 50,
+        "bold": True,
+        "base_color": (240, 253, 244, 255),      # Light mint base
+        "highlight_color": (52, 211, 153, 255),   # Emerald green highlight
+        "stroke_width": 4,
+        "stroke_color": (6, 78, 59, 255),         # Deep forest green outline
+        "shadow_offset": (3, 3),
+        "shadow_color": (0, 0, 0, 150),
+    },
+    "Simple White": {
+        "font_family": "Segoe UI",
+        "font_size": 48,
+        "bold": True,
+        "base_color": (255, 255, 255, 255),
+        "highlight_color": (255, 255, 255, 255),  # Plain white, no highlights
+        "stroke_width": 4,
+        "stroke_color": (0, 0, 0, 255),
+        "shadow_offset": (2, 2),
+        "shadow_color": (0, 0, 0, 220),
+    },
+    "Royal Gold": {
+        "font_family": "Georgia",
+        "font_size": 52,
+        "bold": True,
+        "base_color": (254, 243, 199, 255),      # Cream/Champagne base
+        "highlight_color": (217, 119, 6, 255),    # Deep rich amber gold
+        "stroke_width": 4,
+        "stroke_color": (0, 0, 0, 255),
+        "shadow_offset": (3, 3),
+        "shadow_color": (0, 0, 0, 200),
+    },
+    "Retro Orange": {
+        "font_family": "Impact",
+        "font_size": 56,
+        "bold": True,
+        "base_color": (255, 255, 255, 255),
+        "highlight_color": (249, 115, 22, 255),   # Bright safety orange
+        "stroke_width": 5,
+        "stroke_color": (0, 0, 0, 255),
+        "shadow_offset": (4, 4),
+        "shadow_color": (0, 0, 0, 255),
+    }
+}
+
 _FONT_PATHS_BOLD = [
     ("C:/Windows/Fonts/seguibl.ttf", 0),  # Segoe UI Black (Super premium bold look)
     ("C:/Windows/Fonts/segoeuib.ttf", 0), # Segoe UI Bold
@@ -44,12 +124,42 @@ _FONT_PATHS_REGULAR = [
     ("C:/Windows/Fonts/arial.ttf", 0),
 ]
 
+_FONT_FAMILY_MAPPING = {
+    "Segoe UI": {
+        "bold": [("C:/Windows/Fonts/seguibl.ttf", 0), ("C:/Windows/Fonts/segoeuib.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/segoeui.ttf", 0)],
+    },
+    "Arial": {
+        "bold": [("C:/Windows/Fonts/ariblk.ttf", 0), ("C:/Windows/Fonts/arialbd.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/arial.ttf", 0)],
+    },
+    "Trebuchet MS": {
+        "bold": [("C:/Windows/Fonts/trebucbd.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/trebuc.ttf", 0)],
+    },
+    "Georgia": {
+        "bold": [("C:/Windows/Fonts/georgiab.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/georgia.ttf", 0)],
+    },
+    "Impact": {
+        "bold": [("C:/Windows/Fonts/impact.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/impact.ttf", 0)],
+    },
+    "Comic Sans": {
+        "bold": [("C:/Windows/Fonts/comicbd.ttf", 0)],
+        "regular": [("C:/Windows/Fonts/comic.ttf", 0)],
+    }
+}
 
-def _get_font_paths(text: str, bold: bool = True) -> list[tuple[str, int]]:
-    """Get the appropriate font path chain depending on whether the text has Indic/non-ASCII characters."""
+
+def _get_font_paths(text: str, font_family: str = "Segoe UI", bold: bool = True) -> list[tuple[str, int]]:
+    """Get the appropriate font path chain depending on requested family and text characters."""
     if any(ord(c) > 127 for c in text):
         return [("C:/Windows/Fonts/Nirmala.ttc", 1 if bold else 0)] + (_FONT_PATHS_BOLD if bold else _FONT_PATHS_REGULAR)
-    return _FONT_PATHS_BOLD if bold else _FONT_PATHS_REGULAR
+    
+    family_entry = _FONT_FAMILY_MAPPING.get(font_family, _FONT_FAMILY_MAPPING["Segoe UI"])
+    primary_paths = family_entry["bold"] if bold else family_entry["regular"]
+    return primary_paths + (_FONT_PATHS_BOLD if bold else _FONT_PATHS_REGULAR)
 
 
 def _draw_highlighted_text(
@@ -61,7 +171,9 @@ def _draw_highlighted_text(
     base_color=(255, 255, 255, 255),
     highlight_color=(255, 210, 60, 255),
     stroke_width=4,
-    stroke_fill=(0, 0, 0, 255)
+    stroke_fill=(0, 0, 0, 255),
+    shadow_offset=(3, 3),
+    shadow_color=(0, 0, 0, 200)
 ):
     """Draw text word-by-word centered at (cx, cy) with key travel terms highlighted in bright yellow."""
     words = text.split()
@@ -117,7 +229,14 @@ def _draw_highlighted_text(
         ty = cy - w_height // 2
         
         # 1. Draw outer black drop-shadow for heavy legibility over any bright background
-        draw.text((start_x + 3, ty + 3), w_text, font=font, fill=(0, 0, 0, 200), stroke_width=stroke_width, stroke_fill=(0, 0, 0, 200))
+        draw.text(
+            (start_x + shadow_offset[0], ty + shadow_offset[1]), 
+            w_text, 
+            font=font, 
+            fill=shadow_color, 
+            stroke_width=stroke_width, 
+            stroke_fill=shadow_color
+        )
         # 2. Draw outline stroke + inner filled text
         draw.text((start_x, ty), w_text, font=font, fill=fill_color, stroke_width=stroke_width, stroke_fill=stroke_fill)
         
@@ -139,6 +258,7 @@ def _load_font(paths: list[tuple[str, int]], size: int) -> ImageFont.FreeTypeFon
 # Thread-safe context variables for dynamic video resolution
 _video_width_var = contextvars.ContextVar("video_width", default=1920)
 _video_height_var = contextvars.ContextVar("video_height", default=1080)
+_caption_theme_var = contextvars.ContextVar("caption_theme", default="Neon Yellow (Default)")
 
 def get_width() -> int:
     return _video_width_var.get()
@@ -583,26 +703,42 @@ def _create_title_overlay_clip(city_name: str, num_attractions: int, duration: f
 
 def _render_subtitle_image(text: str) -> str:
     """Render a subtitle line onto a transparent canvas and save as temporary PNG."""
+    active_theme = _caption_theme_var.get()
+    theme = CAPTION_THEMES.get(active_theme, CAPTION_THEMES["Neon Yellow (Default)"])
+    
     overlay = Image.new("RGBA", (get_width(), get_height()), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     
     # Modern Segoe UI bold size 52 with dynamic Indic language detection
-    font_paths = _get_font_paths(text, bold=True)
-    font = _load_font(font_paths, 52)
+    font_paths = _get_font_paths(text, font_family=theme["font_family"], bold=theme["bold"])
+    font_size = theme["font_size"]
+    font = _load_font(font_paths, font_size)
     
     # Measure text size and scale down if too wide
     max_sub_width = get_width() - 100  # 50px margin on each side
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     if tw > max_sub_width:
-        font = _load_font(font_paths, int(52 * (max_sub_width / tw)))
+        font = _load_font(font_paths, int(font_size * (max_sub_width / tw)))
     
     # Position centered horizontally, 82% height vertically
     cx = get_width() // 2
     cy = int(get_height() * 0.82)
     
     # Draw subtitle word-by-word with stroke and shadow highlighting keywords
-    _draw_highlighted_text(draw, text, font, cx, cy)
+    _draw_highlighted_text(
+        draw, 
+        text, 
+        font, 
+        cx, 
+        cy,
+        base_color=theme["base_color"],
+        highlight_color=theme["highlight_color"],
+        stroke_width=theme["stroke_width"],
+        stroke_fill=theme["stroke_color"],
+        shadow_offset=theme["shadow_offset"],
+        shadow_color=theme["shadow_color"]
+    )
     
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     overlay.save(tmp.name)
@@ -1074,32 +1210,14 @@ def generate_travel_video(
     music_volume: float = 0.5,
     transition_style: str = "none",
     transition_sound: str = "none",
+    caption_theme: str = "Neon Yellow (Default)",
 ) -> bytes:
-    """End-to-end travel guide video generation.
-
-    1. Parse script into attraction segments
-    2. Generate TTS audio for each segment
-    3. Download matching media assets
-    4. Compile and render the final video
-    5. Return the video bytes
-
-    Args:
-        script: The video_script with [attraction: ...] markers.
-        pics: List of {"url": ..., "label": ...} photo assets.
-        videos: List of {"url": ..., "label": ...} video assets.
-        city_name: The destination city name for the title overlay.
-        aspect_ratio: "horizontal" (16:9) or "portrait" (9:16).
-        speaker: Optional custom speaker override name.
-        language_code: Optional custom target language code.
-        music_mood: Background music mood selection.
-
-    Returns:
-        Raw bytes of the compiled MP4 video.
-    """
+    """End-to-end travel guide video generation."""
     import logging
     logger = logging.getLogger(__name__)
 
-    # Set dynamic resolution in context variables (thread-safe)
+    # Set dynamic resolution and theme in context variables (thread-safe)
+    t_token = _caption_theme_var.set(caption_theme)
     if aspect_ratio.lower() == "portrait":
         logger.info("[Video Gen] Configuring portrait resolution (1080x1920)")
         w_token = _video_width_var.set(1080)
@@ -1174,6 +1292,7 @@ def generate_travel_video(
         # Reset context variables
         _video_width_var.reset(w_token)
         _video_height_var.reset(h_token)
+        _caption_theme_var.reset(t_token)
         # Cleanup temp dir (keep output)
         import shutil
         try:

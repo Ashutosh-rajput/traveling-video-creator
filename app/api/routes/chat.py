@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 import os
 
@@ -29,6 +29,7 @@ class VideoRequest(BaseModel):
     music_volume: float = Field(default=0.5, description="Volume level for background music (0.0 to 1.0).")
     transition_style: str = Field(default="none", description="Visual transition style ('none', 'fade', 'zoom', 'slide').")
     transition_sound: str = Field(default="none", description="Transition sound effect ('none', 'whoosh', 'click', 'glitch').")
+    caption_theme: str = Field(default="Neon Yellow (Default)", description="Subtitles visual preset style")
 
 
 @router.get("/chat/background-music")
@@ -97,7 +98,16 @@ async def chat_with_agent(
         ) from exc
 
 
-@router.post("/tts")
+@router.post(
+    "/tts",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"audio/wav": {}},
+            "description": "Return the generated TTS voiceover audio file (WAV).",
+        }
+    }
+)
 async def text_to_speech_endpoint(payload: TTSRequest):
     try:
         audio_data = generate_tts(
@@ -149,6 +159,7 @@ async def generate_video_endpoint(payload: VideoRequest):
             payload.music_volume,
             payload.transition_style,
             payload.transition_sound,
+            payload.caption_theme,
         )
 
         # Cache the generated video inside data/output_videos preserving filename
@@ -219,4 +230,14 @@ async def get_last_video_metadata_endpoint():
         status_code=status.HTTP_404_NOT_FOUND,
         detail="No previously generated video found."
     )
+
+
+@router.get("/diagnostic-tts", response_class=HTMLResponse)
+async def diagnostic_tts_page():
+    """Serve the diagnostic TTS test HTML utility page directly from same origin to bypass CORS blocks."""
+    html_path = "scratch/test_tts.html"
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            return f.read()
+    raise HTTPException(status_code=404, detail="Diagnostic tool HTML file not found.")
 
