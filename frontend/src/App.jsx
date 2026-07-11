@@ -59,15 +59,22 @@ function App() {
   const [musicTracks, setMusicTracks] = useState([]);
   const [transitionStyle, setTransitionStyle] = useState('none');
   const [transitionSound, setTransitionSound] = useState('none');
+  const [transitionSounds, setTransitionSounds] = useState([]);
+  const [previewingTransition, setPreviewingTransition] = useState(false);
+  const [previewTransitionAudio, setPreviewTransitionAudio] = useState(null);
   const [numPlaces, setNumPlaces] = useState(5);
   const [videoLength, setVideoLength] = useState('medium');
   const [aspectRatio, setAspectRatio] = useState('horizontal');
   const [captionTheme, setCaptionTheme] = useState('Neon Yellow (Default)');
   
+  // Settings sub-tab selection state: 'layout', 'voice', 'audio'
+  const [settingsTab, setSettingsTab] = useState('layout');
+  
   // Canvas Active Workspace tab: 'video', 'script', 'gallery', 'logs'
   const [canvasTab, setCanvasTab] = useState('video');
   const [activeGalleryTab, setActiveGalleryTab] = useState('videos');
   const [lightboxItem, setLightboxItem] = useState(null);
+  const [selectedMedia, setSelectedMedia] = useState({}); // { attractionLabel: [asset1, asset2] }
 
   // API timers
   const [chatElapsed, setChatElapsed] = useState(0);      // seconds for chat API
@@ -176,6 +183,29 @@ function App() {
       setVideos(data.videos || []);
       setToolData(data.tool_data || []);
       setVideoScript(data.video_script || '');
+
+      // Initialize selected media mapping per attraction label
+      const initialSelected = {};
+      const uniqueLabels = Array.from(new Set([
+        ...(data.videos || []).map(v => v.label),
+        ...(data.pics || []).map(p => p.label)
+      ])).filter(Boolean);
+
+      uniqueLabels.forEach(label => {
+        const placeVideos = (data.videos || []).filter(v => v.label === label);
+        const placePhotos = (data.pics || []).filter(p => p.label === label);
+        
+        let selected = [];
+        if (placeVideos.length >= 2) {
+          selected = placeVideos.slice(0, 2);
+        } else if (placeVideos.length === 1) {
+          selected = [placeVideos[0], ...placePhotos.slice(0, 1)];
+        } else {
+          selected = placePhotos.slice(0, 2);
+        }
+        initialSelected[label] = selected;
+      });
+      setSelectedMedia(initialSelected);
       
       // Auto switch tabs on success
       setCanvasTab('script');
@@ -186,6 +216,32 @@ function App() {
       setLoading(false);
       clearInterval(chatTimerRef.current);
     }
+  };
+
+  const handleToggleMedia = (label, asset) => {
+    setSelectedMedia(prev => {
+      const current = prev[label] || [];
+      const assetUrl = asset.video_url || asset.image_url || asset.url;
+      const exists = current.some(item => (item.video_url || item.image_url || item.url) === assetUrl);
+      
+      let next = [];
+      if (exists) {
+        // Remove it
+        next = current.filter(item => (item.video_url || item.image_url || item.url) !== assetUrl);
+      } else {
+        // Add it
+        if (current.length >= 2) {
+          // FIFO: remove oldest, add new
+          next = [current[1], asset];
+        } else {
+          next = [...current, asset];
+        }
+      }
+      return {
+        ...prev,
+        [label]: next
+      };
+    });
   };
 
   const handleQuickSearch = (term) => {
@@ -263,6 +319,16 @@ function App() {
     }
   }, [musicMood]);
 
+  // Handle stopping preview when transition sound changes
+  useEffect(() => {
+    if (previewTransitionAudio) {
+      previewTransitionAudio.pause();
+      previewTransitionAudio.src = '';
+      setPreviewingTransition(false);
+      setPreviewTransitionAudio(null);
+    }
+  }, [transitionSound]);
+
   // Clean up preview audio on unmount
   useEffect(() => {
     return () => {
@@ -270,10 +336,14 @@ function App() {
         previewAudio.pause();
         previewAudio.src = '';
       }
+      if (previewTransitionAudio) {
+        previewTransitionAudio.pause();
+        previewTransitionAudio.src = '';
+      }
     };
-  }, [previewAudio]);
+  }, [previewAudio, previewTransitionAudio]);
 
-  // Load background music options dynamically on mount and check for cached last video
+  // Load background music and transition sound options dynamically on mount and check for cached last video
   useEffect(() => {
     fetch('/api/v1/chat/background-music')
       .then(res => res.json())
@@ -283,6 +353,15 @@ function App() {
         }
       })
       .catch(err => console.error("Error loading background music tracks:", err));
+
+    fetch('/api/v1/chat/transition-sounds')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setTransitionSounds(data);
+        }
+      })
+      .catch(err => console.error("Error loading transition sounds:", err));
 
     // Check if a last generated video exists in the backend cache
     fetch('/api/v1/chat/last-video', { method: 'HEAD' })
@@ -331,6 +410,201 @@ function App() {
     }
   };
 
+  const toggleTransitionPreview = () => {
+    if (previewingTransition && previewTransitionAudio) {
+      previewTransitionAudio.pause();
+      setPreviewingTransition(false);
+    } else {
+      if (previewTransitionAudio) {
+        previewTransitionAudio.pause();
+        previewTransitionAudio.src = '';
+      }
+      
+      const selectedSound = transitionSounds.find(t => t.id === transitionSound);
+      const filename = selectedSound ? selectedSound.filename : `${transitionSound}.wav`;
+      const audioUrl = `/api/v1/chat/transition-sounds/file/${filename}`;
+      const audio = new Audio(audioUrl);
+      audio.volume = 0.8;
+      
+      audio.play().then(() => {
+        setPreviewTransitionAudio(audio);
+        setPreviewingTransition(true);
+      }).catch((err) => {
+        console.error("Failed to play transition preview:", err);
+      });
+      
+      audio.onended = () => {
+        setPreviewingTransition(false);
+      };
+      
+      setPreviewTransitionAudio(audio);
+    }
+  };
+  const handleMusicUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      setLoading(true);
+      const res = await fetch('/api/v1/chat/background-music/upload', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to upload background music.');
+      }
+
+      const result = await res.json();
+      
+      // Reload tracks
+      const listRes = await fetch('/api/v1/chat/background-music');
+      const listData = await listRes.json();
+      if (Array.isArray(listData)) {
+        setMusicTracks(listData);
+        // Find newly uploaded track ID and set it as selected
+        const trackId = result.filename.split('.')[0];
+        setMusicMood(trackId);
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMusicDelete = async () => {
+    if (musicMood === 'none') return;
+    const selectedTrack = musicTracks.find(t => t.id === musicMood);
+    if (!selectedTrack) return;
+
+    if (!confirm(`Are you sure you want to delete "${selectedTrack.name}"?`)) return;
+
+    try {
+      setLoading(true);
+      
+      // Pause preview if playing
+      if (previewAudio) {
+        previewAudio.pause();
+        setPreviewingMusic(false);
+        setPreviewAudio(null);
+      }
+
+      const res = await fetch(`/api/v1/chat/background-music/file/${selectedTrack.filename}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to delete track.');
+      }
+
+      // Reload tracks list
+      const listRes = await fetch('/api/v1/chat/background-music');
+      const listData = await listRes.json();
+      if (Array.isArray(listData)) {
+        setMusicTracks(listData);
+      }
+      setMusicMood('none');
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTransitionSoundUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      setLoading(true);
+      const res = await fetch('/api/v1/chat/transition-sounds/upload', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to upload sound effect.');
+      }
+
+      const result = await res.json();
+      
+      // Reload transition sounds
+      const listRes = await fetch('/api/v1/chat/transition-sounds');
+      const listData = await listRes.json();
+      if (Array.isArray(listData)) {
+        setTransitionSounds(listData);
+        // Find newly uploaded sound ID and set it as selected
+        const soundId = result.filename.split('.')[0];
+        setTransitionSound(soundId);
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTransitionSoundDelete = async () => {
+    if (transitionSound === 'none') return;
+    
+    // Protect defaults
+    const defaults = ['whoosh', 'click', 'glitch'];
+    if (defaults.includes(transitionSound.toLowerCase())) {
+      alert("Cannot delete default system transition sounds.");
+      return;
+    }
+
+    const selectedSound = transitionSounds.find(s => s.id === transitionSound);
+    if (!selectedSound) return;
+
+    if (!confirm(`Are you sure you want to delete "${selectedSound.name}"?`)) return;
+
+    try {
+      setLoading(true);
+      
+      // Pause preview if playing
+      if (previewTransitionAudio) {
+        previewTransitionAudio.pause();
+        setPreviewingTransition(false);
+        setPreviewTransitionAudio(null);
+      }
+
+      const res = await fetch(`/api/v1/chat/transition-sounds/file/${selectedSound.filename}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to delete transition sound.');
+      }
+
+      // Reload list
+      const listRes = await fetch('/api/v1/chat/transition-sounds');
+      const listData = await listRes.json();
+      if (Array.isArray(listData)) {
+        setTransitionSounds(listData);
+      }
+      setTransitionSound('none');
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
   // Video generation progress simulation stages
   const videoStages = [
     "Parsing script segments...",
@@ -360,13 +634,37 @@ function App() {
     }, 8000);
 
     try {
+      // Extract selected assets from selectedMedia dictionary
+      const finalSelectedPics = [];
+      const finalSelectedVids = [];
+
+      Object.values(selectedMedia).forEach(assets => {
+        if (Array.isArray(assets)) {
+          assets.forEach(asset => {
+            if (asset.video_url) {
+              // Video asset
+              finalSelectedVids.push({
+                url: asset.video_url,
+                label: asset.label
+              });
+            } else {
+              // Photo asset
+              finalSelectedPics.push({
+                url: asset.image_url || asset.url,
+                label: asset.label
+              });
+            }
+          });
+        }
+      });
+
       const res = await fetch('/api/v1/chat/generate-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           script: videoScript,
-          pics: pics.map(p => ({ url: p.url, label: p.label })),
-          videos: videos.map(v => ({ url: v.url, label: v.label })),
+          pics: finalSelectedPics,
+          videos: finalSelectedVids,
           city_name: query,
           aspect_ratio: aspectRatio,
           speaker: selectedSpeaker,
@@ -449,330 +747,548 @@ function App() {
                 </div>
               </div>
 
-              {/* Language Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Language Accent</label>
-                <select 
-                  value={selectedLanguage} 
-                  onChange={(e) => setSelectedLanguage(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
+              {/* Settings Sub-Tab Control Bar */}
+              <div className="settings-tab-container">
+                <button
+                  type="button"
+                  onClick={() => setSettingsTab('layout')}
+                  className={`settings-tab-btn ${settingsTab === 'layout' ? 'active' : ''}`}
                 >
-                  {languagesList.map((lang) => (
-                    <option key={lang.code} value={lang.code} style={{ background: '#0f172a' }}>{lang.name}</option>
-                  ))}
-                </select>
+                  📽️ Layout
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettingsTab('voice')}
+                  className={`settings-tab-btn ${settingsTab === 'voice' ? 'active' : ''}`}
+                >
+                  🗣️ Voice & Subs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettingsTab('audio')}
+                  className={`settings-tab-btn ${settingsTab === 'audio' ? 'active' : ''}`}
+                >
+                  🎵 Music & FX
+                </button>
               </div>
 
-              {/* Speaker Voice Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Speaker Voice</label>
-                <select 
-                  value={selectedSpeaker} 
-                  onChange={(e) => setSelectedSpeaker(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {speakersList.map((spk) => (
-                    <option key={spk} value={spk} style={{ background: '#0f172a' }}>{spk}</option>
-                  ))}
-                </select>
-              </div>
+              {/* Tab Content 1: Video Layout Settings */}
+              {settingsTab === 'layout' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '5px' }}>
+                  {/* Number of Attractions Slider */}
+                  <div className="console-input-group">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <label className="console-input-label">Attractions to Cover</label>
+                      <span style={{ fontSize: '0.9rem', color: '#38bdf8', fontWeight: '700' }}>{numPlaces}</span>
+                    </div>
+                    <input 
+                      type="range" 
+                      min="3" 
+                      max="10" 
+                      value={numPlaces}
+                      disabled={loading}
+                      onChange={(e) => setNumPlaces(parseInt(e.target.value))}
+                      style={{
+                        width: '100%',
+                        accentColor: '#38bdf8',
+                        background: 'rgba(15, 23, 42, 0.6)',
+                        borderRadius: '6px',
+                        height: '6px',
+                        outline: 'none',
+                        cursor: 'pointer',
+                        marginTop: '8px'
+                      }}
+                    />
+                  </div>
 
-              {/* Caption Theme Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Caption Style Theme</label>
-                <select 
-                  value={captionTheme} 
-                  onChange={(e) => setCaptionTheme(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {captionThemesList.map((theme) => (
-                    <option key={theme} value={theme} style={{ background: '#0f172a' }}>{theme}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Background Music Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Background Music</label>
-                <select 
-                  value={musicMood} 
-                  onChange={(e) => setMusicMood(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <option value="none" style={{ background: '#0f172a' }}>None (No Background Music)</option>
-                  {musicTracks.map((track) => (
-                    <option key={track.id} value={track.id} style={{ background: '#0f172a' }}>
-                      {track.name}
-                    </option>
-                  ))}
-                </select>
-
-                {musicMood !== 'none' && (
-                  <div style={{
-                    marginTop: '10px',
-                    padding: '10px',
-                    borderRadius: '8px',
-                    background: 'rgba(15, 23, 42, 0.4)',
-                    border: '1px solid rgba(255, 255, 255, 0.05)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <button
-                        type="button"
-                        onClick={toggleMusicPreview}
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          background: previewingMusic ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
-                          border: previewingMusic ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(56, 189, 248, 0.4)',
-                          color: previewingMusic ? '#ef4444' : '#38bdf8',
-                          borderRadius: '6px',
-                          padding: '6px 12px',
-                          fontSize: '0.75rem',
-                          fontWeight: '700',
-                          cursor: 'pointer',
-                          gap: '6px',
-                          transition: 'all 0.2s',
-                          borderWidth: '1px',
-                          borderStyle: 'solid'
-                        }}
-                      >
-                        {previewingMusic ? (
-                          <>
-                            <span style={{ 
-                              width: '8px', 
-                              height: '8px', 
-                              borderRadius: '50%', 
-                              background: '#ef4444', 
-                              display: 'inline-block'
-                            }}></span>
-                            Pause Preview
-                          </>
-                        ) : (
-                          <>
-                            <span style={{ fontSize: '0.65rem' }}>▶</span> Play Preview
-                          </>
-                        )}
-                      </button>
-                      <span style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'capitalize' }}>
-                        Previewing: {musicMood}
+                  {/* Length Selector */}
+                  <div className="console-input-group">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <label className="console-input-label">Video Length</label>
+                      <span style={{ fontSize: '0.75rem', color: '#38bdf8', fontWeight: '700', fontFamily: 'monospace' }}>
+                        {videoLength === 'short' ? '~45-60s' : videoLength === 'medium' ? '~1.5-2m' : '~3m'}
                       </span>
                     </div>
-
-                    {/* Volume slider */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: '500' }}>Music Volume</span>
-                        <span style={{ fontSize: '0.7rem', color: '#38bdf8', fontWeight: '700' }}>{Math.round(musicVolume * 100)}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={musicVolume}
-                        onChange={handleMusicVolumeChange}
-                        style={{
-                          width: '100%',
-                          accentColor: '#38bdf8',
-                          background: 'rgba(15, 23, 42, 0.8)',
-                          borderRadius: '4px',
-                          height: '4px',
-                          outline: 'none',
-                          cursor: 'pointer'
-                        }}
-                      />
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {['short', 'medium', 'long'].map((len) => (
+                        <button
+                          key={len}
+                          type="button"
+                          disabled={loading}
+                          onClick={() => setVideoLength(len)}
+                          style={{
+                            flex: 1,
+                            padding: '8px 4px',
+                            borderRadius: '6px',
+                            border: videoLength === len ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border-glass)',
+                            background: videoLength === len ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                            color: videoLength === len ? '#38bdf8' : '#64748b',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            textTransform: 'capitalize',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {len}
+                        </button>
+                      ))}
                     </div>
                   </div>
-                )}
-              </div>
 
-              {/* Transition Style Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Visual Transition Card</label>
-                <select 
-                  value={transitionStyle} 
-                  onChange={(e) => setTransitionStyle(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <option value="none" style={{ background: '#0f172a' }}>None (Direct cut)</option>
-                  <option value="fade" style={{ background: '#0f172a' }}>✨ Smooth Fade Card</option>
-                  <option value="zoom" style={{ background: '#0f172a' }}>🔍 Dynamic Zoom Card</option>
-                  <option value="slide" style={{ background: '#0f172a' }}>↕️ Slide Up Card</option>
-                </select>
-              </div>
-
-              {/* Transition Sound Selection */}
-              <div className="console-input-group">
-                <label className="console-input-label">Transition Sound Effect</label>
-                <select 
-                  value={transitionSound} 
-                  onChange={(e) => setTransitionSound(e.target.value)}
-                  disabled={loading}
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    border: '1px solid var(--border-glass)',
-                    borderRadius: '8px',
-                    padding: '12px 14px',
-                    color: '#e2e8f0',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <option value="none" style={{ background: '#0f172a' }}>None (Silent transition)</option>
-                  <option value="whoosh" style={{ background: '#0f172a' }}>💨 Whoosh Swoosh</option>
-                  <option value="click" style={{ background: '#0f172a' }}>📸 Camera Click</option>
-                  <option value="glitch" style={{ background: '#0f172a' }}>⚡ Sci-Fi Glitch</option>
-                </select>
-              </div>
-
-              {/* Number of Attractions Slider */}
-              <div className="console-input-group">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <label className="console-input-label">Attractions to Cover</label>
-                  <span style={{ fontSize: '0.9rem', color: '#38bdf8', fontWeight: '700' }}>{numPlaces}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="3" 
-                  max="10" 
-                  value={numPlaces}
-                  disabled={loading}
-                  onChange={(e) => setNumPlaces(parseInt(e.target.value))}
-                  style={{
-                    width: '100%',
-                    accentColor: '#38bdf8',
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    borderRadius: '6px',
-                    height: '6px',
-                    outline: 'none',
-                    cursor: 'pointer',
-                    marginTop: '8px'
-                  }}
-                />
-              </div>
-
-              {/* Length and Aspect Ratio row */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-                {/* Length Selector */}
-                <div className="console-input-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <label className="console-input-label">Video Length</label>
-                    <span style={{ fontSize: '0.75rem', color: '#38bdf8', fontWeight: '700', fontFamily: 'monospace' }}>
-                      {videoLength === 'short' ? '~45-60s' : videoLength === 'medium' ? '~1.5-2m' : '~3m'}
-                    </span>
+                  {/* Aspect Ratio Selector */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Aspect Layout</label>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { mode: 'horizontal', label: '16:9 Wide' },
+                        { mode: 'portrait', label: '9:16 Tall' }
+                      ].map((aspect) => (
+                        <button
+                          key={aspect.mode}
+                          type="button"
+                          disabled={loading}
+                          onClick={() => setAspectRatio(aspect.mode)}
+                          style={{
+                            flex: 1,
+                            padding: '8px 4px',
+                            borderRadius: '6px',
+                            border: aspectRatio === aspect.mode ? '1px solid rgba(251, 191, 36, 0.4)' : '1px solid var(--border-glass)',
+                            background: aspectRatio === aspect.mode ? 'rgba(251, 191, 36, 0.15)' : 'transparent',
+                            color: aspectRatio === aspect.mode ? '#fbbf24' : '#64748b',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {aspect.label.split(' ')[1]}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {['short', 'medium', 'long'].map((len) => (
-                      <button
-                        key={len}
-                        type="button"
+                </div>
+              )}
+
+              {/* Tab Content 2: Voice & Language style */}
+              {settingsTab === 'voice' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '5px' }}>
+                  {/* Language Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Language Accent</label>
+                    <select 
+                      value={selectedLanguage} 
+                      onChange={(e) => setSelectedLanguage(e.target.value)}
+                      disabled={loading}
+                      style={{
+                        background: 'rgba(15, 23, 42, 0.6)',
+                        border: '1px solid var(--border-glass)',
+                        borderRadius: '8px',
+                        padding: '12px 14px',
+                        color: '#e2e8f0',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {languagesList.map((lang) => (
+                        <option key={lang.code} value={lang.code} style={{ background: '#0f172a' }}>{lang.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Speaker Voice Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Speaker Voice</label>
+                    <select 
+                      value={selectedSpeaker} 
+                      onChange={(e) => setSelectedSpeaker(e.target.value)}
+                      disabled={loading}
+                      style={{
+                        background: 'rgba(15, 23, 42, 0.6)',
+                        border: '1px solid var(--border-glass)',
+                        borderRadius: '8px',
+                        padding: '12px 14px',
+                        color: '#e2e8f0',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {speakersList.map((spk) => (
+                        <option key={spk} value={spk} style={{ background: '#0f172a' }}>{spk}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Caption Theme Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Caption Style Theme</label>
+                    <select 
+                      value={captionTheme} 
+                      onChange={(e) => setCaptionTheme(e.target.value)}
+                      disabled={loading}
+                      style={{
+                        background: 'rgba(15, 23, 42, 0.6)',
+                        border: '1px solid var(--border-glass)',
+                        borderRadius: '8px',
+                        padding: '12px 14px',
+                        color: '#e2e8f0',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {captionThemesList.map((theme) => (
+                        <option key={theme} value={theme} style={{ background: '#0f172a' }}>{theme}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab Content 3: Audio & Sound Effects */}
+              {settingsTab === 'audio' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '5px' }}>
+                  {/* Background Music Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Background Music</label>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <select 
+                        value={musicMood} 
+                        onChange={(e) => setMusicMood(e.target.value)}
                         disabled={loading}
-                        onClick={() => setVideoLength(len)}
                         style={{
                           flex: 1,
-                          padding: '8px 4px',
-                          borderRadius: '6px',
-                          border: videoLength === len ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border-glass)',
-                          background: videoLength === len ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                          color: videoLength === len ? '#38bdf8' : '#64748b',
-                          fontSize: '0.75rem',
-                          fontWeight: '700',
-                          textTransform: 'capitalize',
-                          cursor: 'pointer'
+                          background: 'rgba(15, 23, 42, 0.6)',
+                          border: '1px solid var(--border-glass)',
+                          borderRadius: '8px',
+                          padding: '12px 14px',
+                          color: '#e2e8f0',
+                          fontSize: '0.95rem',
+                          outline: 'none',
+                          cursor: 'pointer',
+                          minWidth: 0
                         }}
                       >
-                        {len}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                        <option value="none" style={{ background: '#0f172a' }}>None (No Background Music)</option>
+                        {musicTracks.map((track) => (
+                          <option key={track.id} value={track.id} style={{ background: '#0f172a' }}>
+                            {track.name}
+                          </option>
+                        ))}
+                      </select>
 
-                {/* Aspect Ratio Selector */}
-                <div className="console-input-group">
-                  <label className="console-input-label">Aspect Layout</label>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {[
-                      { mode: 'horizontal', label: '16:9 Wide' },
-                      { mode: 'portrait', label: '9:16 Tall' }
-                    ].map((aspect) => (
-                      <button
-                        key={aspect.mode}
-                        type="button"
+                      <label 
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: 'rgba(56, 189, 248, 0.15)',
+                          border: '1px solid rgba(56, 189, 248, 0.4)',
+                          color: '#38bdf8',
+                          borderRadius: '8px',
+                          padding: '12px',
+                          cursor: 'pointer',
+                          fontSize: '0.95rem',
+                          transition: 'all 0.2s',
+                          height: '46px',
+                          width: '46px'
+                        }}
+                        title="Upload background music (.mp3, .wav)"
+                      >
+                        ➕
+                        <input 
+                          type="file" 
+                          accept=".mp3,.wav" 
+                          onChange={handleMusicUpload} 
+                          style={{ display: 'none' }}
+                          disabled={loading}
+                        />
+                      </label>
+
+                      {musicMood !== 'none' && (
+                        <button
+                          type="button"
+                          onClick={handleMusicDelete}
+                          disabled={loading}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            border: '1px solid rgba(239, 68, 68, 0.4)',
+                            color: '#ef4444',
+                            borderRadius: '8px',
+                            padding: '12px',
+                            cursor: 'pointer',
+                            fontSize: '0.95rem',
+                            transition: 'all 0.2s',
+                            height: '46px',
+                            width: '46px'
+                          }}
+                          title="Delete selected track"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
+
+                    {musicMood !== 'none' && (
+                      <div style={{
+                        marginTop: '10px',
+                        padding: '10px',
+                        borderRadius: '8px',
+                        background: 'rgba(15, 23, 42, 0.4)',
+                        border: '1px solid rgba(255, 255, 255, 0.05)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <button
+                            type="button"
+                            onClick={toggleMusicPreview}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              background: previewingMusic ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                              border: previewingMusic ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(56, 189, 248, 0.4)',
+                              color: previewingMusic ? '#ef4444' : '#38bdf8',
+                              borderRadius: '6px',
+                              padding: '6px 12px',
+                              fontSize: '0.75rem',
+                              fontWeight: '700',
+                              cursor: 'pointer',
+                              gap: '6px',
+                              transition: 'all 0.2s',
+                              borderWidth: '1px',
+                              borderStyle: 'solid'
+                            }}
+                          >
+                            {previewingMusic ? (
+                              <>
+                                <span style={{ 
+                                  width: '8px', 
+                                  height: '8px', 
+                                  borderRadius: '50%', 
+                                  background: '#ef4444', 
+                                  display: 'inline-block'
+                                }}></span>
+                                Pause Preview
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ fontSize: '0.65rem' }}>▶</span> Play Preview
+                              </>
+                            )}
+                          </button>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'capitalize' }}>
+                            Previewing: {musicMood}
+                          </span>
+                        </div>
+
+                        {/* Volume slider */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: '500' }}>Music Volume</span>
+                            <span style={{ fontSize: '0.7rem', color: '#38bdf8', fontWeight: '700' }}>{Math.round(musicVolume * 100)}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={musicVolume}
+                            onChange={handleMusicVolumeChange}
+                            style={{
+                              width: '100%',
+                              accentColor: '#38bdf8',
+                              background: 'rgba(15, 23, 42, 0.8)',
+                              borderRadius: '4px',
+                              height: '4px',
+                              outline: 'none',
+                              cursor: 'pointer'
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Transition Style Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Visual Transition Card</label>
+                    <select 
+                      value={transitionStyle} 
+                      onChange={(e) => setTransitionStyle(e.target.value)}
+                      disabled={loading}
+                      style={{
+                        background: 'rgba(15, 23, 42, 0.6)',
+                        border: '1px solid var(--border-glass)',
+                        borderRadius: '8px',
+                        padding: '12px 14px',
+                        color: '#e2e8f0',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <option value="none" style={{ background: '#0f172a' }}>None (Direct cut)</option>
+                      <option value="fade" style={{ background: '#0f172a' }}>✨ Smooth Fade Card</option>
+                      <option value="zoom" style={{ background: '#0f172a' }}>🔍 Dynamic Zoom Card</option>
+                      <option value="slide" style={{ background: '#0f172a' }}>↕️ Slide Up Card</option>
+                    </select>
+                  </div>
+
+                  {/* Transition Sound Selection */}
+                  <div className="console-input-group">
+                    <label className="console-input-label">Transition Sound Effect</label>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <select 
+                        value={transitionSound} 
+                        onChange={(e) => setTransitionSound(e.target.value)}
                         disabled={loading}
-                        onClick={() => setAspectRatio(aspect.mode)}
                         style={{
                           flex: 1,
-                          padding: '8px 4px',
-                          borderRadius: '6px',
-                          border: aspectRatio === aspect.mode ? '1px solid rgba(251, 191, 36, 0.4)' : '1px solid var(--border-glass)',
-                          background: aspectRatio === aspect.mode ? 'rgba(251, 191, 36, 0.15)' : 'transparent',
-                          color: aspectRatio === aspect.mode ? '#fbbf24' : '#64748b',
-                          fontSize: '0.75rem',
-                          fontWeight: '700',
-                          cursor: 'pointer'
+                          background: 'rgba(15, 23, 42, 0.6)',
+                          border: '1px solid var(--border-glass)',
+                          borderRadius: '8px',
+                          padding: '12px 14px',
+                          color: '#e2e8f0',
+                          fontSize: '0.95rem',
+                          outline: 'none',
+                          cursor: 'pointer',
+                          minWidth: 0
                         }}
                       >
-                        {aspect.label.split(' ')[1]}
-                      </button>
-                    ))}
+                        <option value="none" style={{ background: '#0f172a' }}>None (Silent transition)</option>
+                        {transitionSounds.map((sound) => (
+                          <option key={sound.id} value={sound.id} style={{ background: '#0f172a' }}>
+                            {sound.name}
+                          </option>
+                        ))}
+                        {/* Fallbacks if transitionSounds is empty or loading */}
+                        {transitionSounds.length === 0 && (
+                          <>
+                            <option value="whoosh" style={{ background: '#0f172a' }}>💨 Whoosh Swoosh</option>
+                            <option value="click" style={{ background: '#0f172a' }}>📸 Camera Click</option>
+                            <option value="glitch" style={{ background: '#0f172a' }}>⚡ Sci-Fi Glitch</option>
+                          </>
+                        )}
+                      </select>
+
+                      <label 
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: 'rgba(56, 189, 248, 0.15)',
+                          border: '1px solid rgba(56, 189, 248, 0.4)',
+                          color: '#38bdf8',
+                          borderRadius: '8px',
+                          padding: '12px',
+                          cursor: 'pointer',
+                          fontSize: '0.95rem',
+                          transition: 'all 0.2s',
+                          height: '46px',
+                          width: '46px'
+                        }}
+                        title="Upload transition sound effect (.mp3, .wav)"
+                      >
+                        ➕
+                        <input 
+                          type="file" 
+                          accept=".mp3,.wav" 
+                          onChange={handleTransitionSoundUpload} 
+                          style={{ display: 'none' }}
+                          disabled={loading}
+                        />
+                      </label>
+
+                      {transitionSound !== 'none' && !['whoosh', 'click', 'glitch'].includes(transitionSound.toLowerCase()) && (
+                        <button
+                          type="button"
+                          onClick={handleTransitionSoundDelete}
+                          disabled={loading}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            border: '1px solid rgba(239, 68, 68, 0.4)',
+                            color: '#ef4444',
+                            borderRadius: '8px',
+                            padding: '12px',
+                            cursor: 'pointer',
+                            fontSize: '0.95rem',
+                            transition: 'all 0.2s',
+                            height: '46px',
+                            width: '46px'
+                          }}
+                          title="Delete selected sound effect"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
+
+                    {transitionSound !== 'none' && (
+                      <div style={{
+                        marginTop: '10px',
+                        padding: '10px',
+                        borderRadius: '8px',
+                        background: 'rgba(15, 23, 42, 0.4)',
+                        border: '1px solid rgba(255, 255, 255, 0.05)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px'
+                      }}>
+                        <button
+                          type="button"
+                          onClick={toggleTransitionPreview}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: previewingTransition ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                            border: previewingTransition ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(56, 189, 248, 0.4)',
+                            color: previewingTransition ? '#ef4444' : '#38bdf8',
+                            borderRadius: '6px',
+                            padding: '6px 12px',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            cursor: 'pointer',
+                            gap: '6px',
+                            transition: 'all 0.2s',
+                            borderWidth: '1px',
+                            borderStyle: 'solid'
+                          }}
+                        >
+                          {previewingTransition ? (
+                            <>
+                              <span style={{ 
+                                width: '8px', 
+                                height: '8px', 
+                                borderRadius: '50%', 
+                                background: '#ef4444', 
+                                display: 'inline-block'
+                              }}></span>
+                              Pause Preview
+                            </>
+                          ) : (
+                            <>
+                              <span style={{ fontSize: '0.65rem' }}>▶</span> Play Preview
+                            </>
+                          )}
+                        </button>
+                        <span style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'capitalize' }}>
+                          Previewing: {transitionSound}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
+              )}
 
               {/* Submit / Craft Button */}
               <button 
@@ -848,7 +1364,7 @@ function App() {
                 onClick={() => setCanvasTab('gallery')}
               >
                 <Layers size={16} />
-                <span>Asset Board</span>
+                <span>Choose Media</span>
               </button>
               {debugMode && toolData.length > 0 && (
                 <button 
@@ -1110,131 +1626,255 @@ function App() {
               </div>
             )}
 
-            {/* 6. Active Tab: Asset Gallery Board */}
+            {/* 6. Active Tab: Asset Selector Board */}
             {!loading && canvasTab === 'gallery' && (pics.length > 0 || videos.length > 0) && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-glass)', paddingBottom: '14px' }}>
-                  <div>
-                    <h3 style={{ fontSize: '1.2rem', fontWeight: '700', color: '#e2e8f0' }}>Asset Board</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Media assets compiled by Gemma Search Agent</p>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button 
-                      className={`canvas-tab-btn ${activeGalleryTab === 'videos' ? 'active' : ''}`}
-                      onClick={() => setActiveGalleryTab('videos')}
-                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}
-                    >
-                      <VideoIcon size={14} />
-                      <span>Videos ({videos.length})</span>
-                    </button>
-                    <button 
-                      className={`canvas-tab-btn ${activeGalleryTab === 'photos' ? 'active' : ''}`}
-                      onClick={() => setActiveGalleryTab('photos')}
-                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}
-                    >
-                      <ImageIcon size={14} />
-                      <span>Photos ({pics.length})</span>
-                    </button>
-                  </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                <div style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '14px' }}>
+                  <h3 style={{ fontSize: '1.2rem', fontWeight: '700', color: '#e2e8f0' }}>Choose Segment Media</h3>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    Select exactly <strong>2 items</strong> (videos/photos) for each attraction. If not chosen, default selection will be compiled.
+                  </p>
                 </div>
 
-                {/* Photos Gallery */}
-                {activeGalleryTab === 'photos' && (
-                  pics.length > 0 ? (
-                    <div className="media-grid">
-                      {pics.map((item, index) => (
-                        <div
-                          key={index}
-                          className="media-card"
-                          onClick={() => setLightboxItem({ type: 'photo', url: item.url })}
-                        >
-                          <img
-                            src={item.url}
-                            alt={item.label || `Photo ${index + 1}`}
-                            className="media-image"
-                            loading="lazy"
-                          />
-                          <div className="media-overlay">
-                            <div className="creator-info">
-                              <span className="creator-name">{item.label}</span>
-                              <span className="creator-attribution">High Res Image</span>
-                            </div>
-                            <button
-                              type="button"
-                              className="download-link"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                window.open(item.url, '_blank', 'noopener,noreferrer');
-                              }}
-                            >
-                              <ExternalLink size={16} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="canvas-empty-state" style={{ minHeight: '300px' }}>
-                      <ImageIcon size={36} style={{ color: 'var(--text-muted)', marginBottom: '10px' }} />
-                      <p style={{ color: 'var(--text-secondary)' }}>No photo assets found.</p>
-                    </div>
-                  )
-                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
+                  {Array.from(new Set([
+                    ...videos.map(v => v.label),
+                    ...pics.map(p => p.label)
+                  ])).filter(Boolean).map((label) => {
+                    const placeVideos = videos.filter(v => v.label === label);
+                    const placePhotos = pics.filter(p => p.label === label);
+                    const selected = selectedMedia[label] || [];
+                    const isReady = selected.length === 2;
 
-                {/* Videos Gallery */}
-                {activeGalleryTab === 'videos' && (
-                  videos.length > 0 ? (
-                    <div className="media-grid">
-                      {videos.map((item, index) => (
-                        <div
-                          key={index}
-                          className="media-card"
-                          onClick={() => setLightboxItem({ type: 'video', url: item.url })}
-                          onMouseEnter={(e) => {
-                            const v = e.currentTarget.querySelector('video');
-                            if (v) v.play().catch(() => {});
-                          }}
-                          onMouseLeave={(e) => {
-                            const v = e.currentTarget.querySelector('video');
-                            if (v) { v.pause(); v.currentTime = 0; }
-                          }}
-                        >
-                          <video
-                            src={item.url}
-                            className="media-image"
-                            muted
-                            playsInline
-                          />
-                          <div className="center-play-icon" style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', background: 'rgba(15, 23, 42, 0.7)', padding: '12px', borderRadius: '50%', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', zIndex: 5, pointerEvents: 'none', transition: 'opacity 0.2s ease' }}>
-                            <VideoIcon size={16} />
+                    return (
+                      <div 
+                        key={label}
+                        className="glass-card" 
+                        style={{ 
+                          padding: '20px', 
+                          background: 'rgba(15, 23, 42, 0.25)', 
+                          border: isReady ? '1px solid rgba(56, 189, 248, 0.2)' : '1px solid var(--border-glass)',
+                          boxShadow: isReady ? '0 8px 30px rgba(56, 189, 248, 0.03)' : 'none'
+                        }}
+                      >
+                        {/* Attraction header with indicator badges */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '1.2rem' }}>📍</span>
+                            <h4 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#f1f5f9' }}>{label}</h4>
                           </div>
-                          <div className="media-overlay">
-                            <div className="creator-info">
-                              <span className="creator-name">{item.label}</span>
-                              <span className="creator-attribution">Hover to play preview</span>
-                            </div>
-                            <button
-                              type="button"
-                              className="download-link"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                window.open(item.url, '_blank', 'noopener,noreferrer');
-                              }}
-                            >
-                              <ExternalLink size={16} />
-                            </button>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            {isReady ? (
+                              <span style={{ 
+                                background: 'rgba(34, 197, 94, 0.15)', 
+                                border: '1px solid rgba(34, 197, 94, 0.4)', 
+                                color: '#4ade80',
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                padding: '4px 10px',
+                                borderRadius: '20px'
+                              }}>
+                                Ready (2/2 Selected)
+                              </span>
+                            ) : (
+                              <span style={{ 
+                                background: 'rgba(245, 158, 11, 0.15)', 
+                                border: '1px solid rgba(245, 158, 11, 0.4)', 
+                                color: '#fbbf24',
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                padding: '4px 10px',
+                                borderRadius: '20px'
+                              }}>
+                                {selected.length === 1 ? 'Select 1 more (or fallback will be used)' : 'Select 2 items (or fallback will be used)'}
+                              </span>
+                            )}
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="canvas-empty-state" style={{ minHeight: '300px' }}>
-                      <VideoIcon size={36} style={{ color: 'var(--text-muted)', marginBottom: '10px' }} />
-                      <p style={{ color: 'var(--text-secondary)' }}>No video assets found.</p>
-                    </div>
-                  )
-                )}
+
+                        {/* Combined Grid of Video and Photo candidates */}
+                        <div 
+                          style={{ 
+                            display: 'grid', 
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', 
+                            gap: '14px' 
+                          }}
+                        >
+                          {/* Video candidates (Up to 5) */}
+                          {placeVideos.map((vid, i) => {
+                            const isSelected = selected.some(item => item.video_url === vid.video_url);
+                            return (
+                              <div
+                                key={`vid-${i}`}
+                                style={{
+                                  position: 'relative',
+                                  borderRadius: '10px',
+                                  overflow: 'hidden',
+                                  background: '#020617',
+                                  border: isSelected ? '2px solid #38bdf8' : '1px solid var(--border-glass)',
+                                  boxShadow: isSelected ? '0 0 15px rgba(56, 189, 248, 0.35)' : 'none',
+                                  cursor: 'pointer',
+                                  aspectRatio: '16/10',
+                                  transition: 'all 0.2s ease'
+                                }}
+                                onClick={() => handleToggleMedia(label, vid)}
+                                onMouseEnter={(e) => {
+                                  const v = e.currentTarget.querySelector('video');
+                                  if (v) v.play().catch(() => {});
+                                }}
+                                onMouseLeave={(e) => {
+                                  const v = e.currentTarget.querySelector('video');
+                                  if (v) { v.pause(); v.currentTime = 0; }
+                                }}
+                              >
+                                <video
+                                  src={vid.video_url}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  muted
+                                  playsInline
+                                />
+                                
+                                {/* Video indicator label */}
+                                <div style={{ position: 'absolute', bottom: '6px', left: '6px', background: 'rgba(15, 23, 42, 0.75)', color: '#38bdf8', fontSize: '0.65rem', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(56,189,248,0.2)', fontWeight: '700' }}>
+                                  📹 Video
+                                </div>
+
+                                {/* Magnifier button to enlarge */}
+                                <button
+                                  type="button"
+                                  style={{
+                                    position: 'absolute',
+                                    bottom: '6px',
+                                    right: '6px',
+                                    background: 'rgba(15, 23, 42, 0.8)',
+                                    color: '#f8fafc',
+                                    border: '1px solid rgba(255,255,255,0.1)',
+                                    borderRadius: '4px',
+                                    padding: '4px',
+                                    cursor: 'pointer',
+                                    zIndex: 10
+                                  }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLightboxItem({ type: 'video', url: vid.video_url });
+                                  }}
+                                  title="Enlarge Video"
+                                >
+                                  🔍
+                                </button>
+
+                                {/* Checkmark Overlay */}
+                                {isSelected && (
+                                  <div style={{
+                                    position: 'absolute',
+                                    top: '6px',
+                                    right: '6px',
+                                    background: '#38bdf8',
+                                    color: '#0f172a',
+                                    width: '20px',
+                                    height: '20px',
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: '0.75rem',
+                                    fontWeight: '900',
+                                    boxShadow: '0 2px 5px rgba(0,0,0,0.3)',
+                                    zIndex: 8
+                                  }}>
+                                    ✓
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          {/* Photo candidates (Up to 3) */}
+                          {placePhotos.map((pic, i) => {
+                            const isSelected = selected.some(item => item.image_url === pic.image_url);
+                            return (
+                              <div
+                                key={`pic-${i}`}
+                                style={{
+                                  position: 'relative',
+                                  borderRadius: '10px',
+                                  overflow: 'hidden',
+                                  background: '#020617',
+                                  border: isSelected ? '2px solid #38bdf8' : '1px solid var(--border-glass)',
+                                  boxShadow: isSelected ? '0 0 15px rgba(56, 189, 248, 0.35)' : 'none',
+                                  cursor: 'pointer',
+                                  aspectRatio: '16/10',
+                                  transition: 'all 0.2s ease'
+                                }}
+                                onClick={() => handleToggleMedia(label, pic)}
+                              >
+                                <img
+                                  src={pic.image_url}
+                                  alt=""
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  loading="lazy"
+                                />
+
+                                {/* Photo indicator label */}
+                                <div style={{ position: 'absolute', bottom: '6px', left: '6px', background: 'rgba(15, 23, 42, 0.75)', color: '#fbbf24', fontSize: '0.65rem', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(251,191,36,0.2)', fontWeight: '700' }}>
+                                  🖼️ Photo
+                                </div>
+
+                                {/* Magnifier button to enlarge */}
+                                <button
+                                  type="button"
+                                  style={{
+                                    position: 'absolute',
+                                    bottom: '6px',
+                                    right: '6px',
+                                    background: 'rgba(15, 23, 42, 0.8)',
+                                    color: '#f8fafc',
+                                    border: '1px solid rgba(255,255,255,0.1)',
+                                    borderRadius: '4px',
+                                    padding: '4px',
+                                    cursor: 'pointer',
+                                    zIndex: 10
+                                  }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLightboxItem({ type: 'photo', url: pic.image_url });
+                                  }}
+                                  title="Enlarge Photo"
+                                >
+                                  🔍
+                                </button>
+
+                                {/* Checkmark Overlay */}
+                                {isSelected && (
+                                  <div style={{
+                                    position: 'absolute',
+                                    top: '6px',
+                                    right: '6px',
+                                    background: '#38bdf8',
+                                    color: '#0f172a',
+                                    width: '20px',
+                                    height: '20px',
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: '0.75rem',
+                                    fontWeight: '900',
+                                    boxShadow: '0 2px 5px rgba(0,0,0,0.3)',
+                                    zIndex: 8
+                                  }}>
+                                    ✓
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
 

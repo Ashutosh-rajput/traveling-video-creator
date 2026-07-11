@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 import os
@@ -6,7 +6,7 @@ import os
 from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset
 from app.services.agent import AgentService, get_agent_service
 from app.services.tts import generate_tts
-from app.services.video import generate_travel_video
+from app.services.video import generate_travel_video, ensure_transition_sounds
 
 router = APIRouter(tags=["chat"])
 
@@ -76,6 +76,157 @@ async def get_background_music_file_endpoint(filename: str):
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Background music file '{safe_filename}' not found."
+    )
+
+
+@router.post("/chat/background-music/upload")
+async def upload_background_music_endpoint(file: UploadFile = File(...)):
+    """Upload a background music track (MP3 or WAV)."""
+    if not file.filename.endswith((".mp3", ".wav")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only MP3 and WAV files are supported for background music."
+        )
+    
+    music_dir = "data/background_music"
+    os.makedirs(music_dir, exist_ok=True)
+    
+    safe_filename = os.path.basename(file.filename)
+    dest_path = os.path.join(music_dir, safe_filename)
+    
+    try:
+        with open(dest_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        return {"status": "success", "filename": safe_filename}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload file: {str(e)}"
+        )
+
+
+@router.delete("/chat/background-music/file/{filename}")
+async def delete_background_music_file_endpoint(filename: str):
+    """Delete a background music file from the data folder."""
+    safe_filename = os.path.basename(filename)
+    music_file = os.path.join("data/background_music", safe_filename)
+    if os.path.exists(music_file):
+        try:
+            os.remove(music_file)
+            return {"status": "success", "message": f"Deleted background music track '{safe_filename}'"}
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete file: {str(e)}"
+            )
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Background music file '{safe_filename}' not found."
+    )
+
+
+@router.get("/chat/transition-sounds")
+async def list_transition_sounds_endpoint():
+    """List all available transition sound effects from the data folder."""
+    ensure_transition_sounds()
+    sound_dir = "data/transition_sounds"
+    if not os.path.exists(sound_dir):
+        return []
+    
+    sounds = []
+    for f in os.listdir(sound_dir):
+        if f.endswith((".mp3", ".wav")):
+            name_without_ext = os.path.splitext(f)[0]
+            pretty_name = name_without_ext.replace("_", " ").replace("-", " ").title()
+            
+            emoji = "🔊"
+            if "whoosh" in name_without_ext.lower():
+                emoji = "💨"
+            elif "click" in name_without_ext.lower():
+                emoji = "📸"
+            elif "glitch" in name_without_ext.lower():
+                emoji = "⚡"
+                
+            sounds.append({
+                "id": name_without_ext,
+                "name": f"{emoji} {pretty_name}",
+                "filename": f
+            })
+    return sounds
+
+
+@router.get("/chat/transition-sounds/file/{filename}")
+async def get_transition_sound_file_endpoint(filename: str):
+    """Retrieve preview audio file for a transition sound effect."""
+    safe_filename = os.path.basename(filename)
+    sound_file = os.path.join("data/transition_sounds", safe_filename)
+    if os.path.exists(sound_file):
+        media_type = "audio/mpeg" if safe_filename.endswith(".mp3") else "audio/wav"
+        return FileResponse(
+            path=sound_file,
+            media_type=media_type,
+            filename=safe_filename
+        )
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Transition sound file '{safe_filename}' not found."
+    )
+
+
+@router.post("/chat/transition-sounds/upload")
+async def upload_transition_sound_endpoint(file: UploadFile = File(...)):
+    """Upload a transition sound effect (MP3 or WAV)."""
+    if not file.filename.endswith((".mp3", ".wav")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only MP3 and WAV files are supported for transition sounds."
+        )
+    
+    sound_dir = "data/transition_sounds"
+    os.makedirs(sound_dir, exist_ok=True)
+    
+    safe_filename = os.path.basename(file.filename)
+    dest_path = os.path.join(sound_dir, safe_filename)
+    
+    try:
+        with open(dest_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        return {"status": "success", "filename": safe_filename}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload file: {str(e)}"
+        )
+
+
+@router.delete("/chat/transition-sounds/file/{filename}")
+async def delete_transition_sound_file_endpoint(filename: str):
+    """Delete a transition sound effect file from the data folder."""
+    safe_filename = os.path.basename(filename)
+    sound_file = os.path.join("data/transition_sounds", safe_filename)
+    
+    # Check if they are trying to delete a default generated sound file
+    default_sounds = ["whoosh.wav", "click.wav", "glitch.wav"]
+    if safe_filename.lower() in default_sounds:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete default transition sound effect '{safe_filename}'."
+        )
+        
+    if os.path.exists(sound_file):
+        try:
+            os.remove(sound_file)
+            return {"status": "success", "message": f"Deleted transition sound effect '{safe_filename}'"}
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete file: {str(e)}"
+            )
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Transition sound file '{safe_filename}' not found."
     )
 
 
@@ -240,4 +391,95 @@ async def diagnostic_tts_page():
         with open(html_path, "r", encoding="utf-8") as f:
             return f.read()
     raise HTTPException(status_code=404, detail="Diagnostic tool HTML file not found.")
+
+
+@router.get("/chat/reddit-search")
+async def search_reddit_endpoint(
+    query: str,
+    limit: int = 5,
+    sort: str = "relevance"
+):
+    """Search public Reddit posts using client credentials from environment variables."""
+    import os
+    import httpx
+
+    client_id = os.getenv("REDDIT_CLIENT_ID")
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reddit Client ID or Client Secret is not configured in .env."
+        )
+
+    headers = {
+        "User-Agent": "travel-video-creator:v1.0 (by /u/ashutosh-rajput)"
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # 1. Get access token
+            auth = httpx.BasicAuth(client_id, client_secret)
+            token_res = await client.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=auth,
+                data={"grant_type": "client_credentials"},
+                headers=headers,
+                timeout=10.0
+            )
+            token_res.raise_for_status()
+            token_data = token_res.json()
+            access_token = token_data.get("access_token")
+
+            if not access_token:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Failed to retrieve access token from Reddit."
+                )
+
+            # 2. Search posts
+            search_headers = {
+                **headers,
+                "Authorization": f"Bearer {access_token}"
+            }
+            search_params = {
+                "q": query,
+                "limit": limit,
+                "sort": sort,
+                "type": "link"
+            }
+            search_res = await client.get(
+                "https://oauth.reddit.com/search",
+                headers=search_headers,
+                params=search_params,
+                timeout=10.0
+            )
+            search_res.raise_for_status()
+            results = search_res.json()
+
+            posts = []
+            children = results.get("data", {}).get("children", [])
+            for child in children:
+                data = child.get("data", {})
+                posts.append({
+                    "title": data.get("title"),
+                    "subreddit": data.get("subreddit"),
+                    "score": data.get("score"),
+                    "url": data.get("url"),
+                    "selftext": data.get("selftext"),
+                    "permalink": f"https://reddit.com{data.get('permalink')}"
+                })
+
+            return {"posts": posts}
+
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Reddit API returned error status {exc.response.status_code}: {exc.response.text}"
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search Reddit: {str(exc)}"
+        ) from exc
 

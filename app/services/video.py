@@ -475,7 +475,7 @@ def download_media_for_segments(
             matching_pics = [p for p in pics if _label_matches(p.get("label", ""), name)]
             matching_vids = [v for v in videos if _label_matches(v.get("label", ""), name)]
 
-        logger.info(f"[Video Gen] Queueing downloads for segment '{name}': {len(matching_vids[:2])} videos, {len(matching_pics[:4])} images.")
+        logger.info(f"[Video Gen] Queueing downloads for segment '{name}': {len(matching_vids)} videos, {len(matching_pics)} images.")
 
         # Limit and download
         for i, p in enumerate(matching_pics[:4]):  # Limit to 4 images per attraction
@@ -483,7 +483,7 @@ def download_media_for_segments(
             dest = seg_dir / f"img_{i}.{ext}"
             download_tasks.append((p["url"], dest, name, "images"))
 
-        for i, v in enumerate(matching_vids[:2]):  # Limit to 2 videos per attraction
+        for i, v in enumerate(matching_vids[:4]):  # Limit to 4 videos per attraction
             ext = _url_ext(v["url"], "mp4")
             dest = seg_dir / f"vid_{i}.{ext}"
             download_tasks.append((v["url"], dest, name, "videos"))
@@ -1052,8 +1052,17 @@ def compile_video(
     # Process transition sound effects
     sfx_clips = []
     if transition_sound and transition_sound.lower() != "none":
-        sfx_path = f"data/transition_sounds/{transition_sound.lower()}.wav"
-        if os.path.exists(sfx_path):
+        sfx_path = None
+        for ext in [".wav", ".mp3"]:
+            for name in [transition_sound, transition_sound.lower()]:
+                test_path = os.path.join("data/transition_sounds", f"{name}{ext}")
+                if os.path.exists(test_path):
+                    sfx_path = test_path
+                    break
+            if sfx_path:
+                break
+                
+        if sfx_path and os.path.exists(sfx_path):
             try:
                 for idx, seg in enumerate(segments):
                     if idx == 0:

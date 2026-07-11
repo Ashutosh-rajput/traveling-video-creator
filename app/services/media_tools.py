@@ -8,8 +8,8 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 
-DEFAULT_LIMIT = 4
-MAX_LIMIT = 8
+DEFAULT_LIMIT = 6
+MAX_LIMIT = 10
 MEDIA_API_TIMEOUT = 8  # seconds – fail fast on slow providers
 
 
@@ -301,30 +301,14 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
             unique_photos.append(pic)
             seen_photo_urls.add(url)
 
-    final_videos = []
-    final_photos = []
-
-    # Filtering rules:
-    # - If >= 2 clips found: keep 2 clips, 0 photos.
-    # - If exactly 1 clip found: keep 1 clip, 2 photos.
-    # - If 0 clips found: keep 0 clips, 4 photos.
-    num_clips_found = len(unique_videos)
-    if num_clips_found >= 2:
-        final_videos = unique_videos[:2]
-        final_photos = []
-        rule_desc = "Kept 2 clips, 0 photos (2+ clips found)"
-    elif num_clips_found == 1:
-        final_videos = unique_videos[:1]
-        final_photos = unique_photos[:2]
-        rule_desc = "Kept 1 clip, 2 photos (1 clip found)"
-    else:
-        final_videos = []
-        final_photos = unique_photos[:4]
-        rule_desc = "Kept 0 clips, 4 photos (0 clips found)"
+    # Extract up to 5 unique videos and up to 3 unique photos for this attraction.
+    final_videos = unique_videos[:5]
+    final_photos = unique_photos[:3]
+    rule_desc = f"Extracted {len(final_videos)} videos and {len(final_photos)} photos"
 
     logger.info(
         f"[Media Search] '{place_name}' search finished. "
-        f"Found {num_clips_found} unique clips, {len(unique_photos)} unique photos. "
+        f"Found {len(unique_videos)} unique clips, {len(unique_photos)} unique photos. "
         f"Rule applied: {rule_desc}"
     )
 
