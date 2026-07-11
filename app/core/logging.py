@@ -9,4 +9,7 @@ def configure_logging() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
         force=True,
     )
+    # Turn off verbose HTTP request logs from httpx and httpcore
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 

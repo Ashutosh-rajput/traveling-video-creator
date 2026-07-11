@@ -22,6 +22,10 @@ class AgentOutput(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=12_000)
     debug: bool = Field(default=False)
+    language: str = Field(default="en-IN", description="Language code for the output (e.g. en-IN, hi-IN).")
+    num_places: int = Field(default=5, ge=3, le=10, description="Number of attractions to cover.")
+    video_length: str = Field(default="medium", description="Length profile of script ('short', 'medium', 'long').")
+    speaker: str = Field(default="Shubh", description="Voice profile for TTS generation.")
 
 
 class ChatResponse(BaseModel):
