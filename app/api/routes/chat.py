@@ -483,3 +483,198 @@ async def search_reddit_endpoint(
             detail=f"Failed to search Reddit: {str(exc)}"
         ) from exc
 
+
+@router.post("/chat/upload-gdrive")
+async def upload_video_to_gdrive_endpoint():
+    """Find the last generated travel video and upload it to Google Drive."""
+    import os
+    import json
+    import httpx
+    
+    # 1. Locate the video
+    output_dir = "data/output_videos"
+    if not os.path.exists(output_dir):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No video has been generated yet. Please compile a video project first."
+        )
+        
+    files = [f for f in os.listdir(output_dir) if f.endswith(".mp4")]
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No compiled MP4 video found in the cache output folder. Please compile a video first."
+        )
+        
+    # Pick the first video file found
+    filename = files[0]
+    file_path = os.path.join(output_dir, filename)
+    
+    # 2. Authenticate & Obtain Google Access Token
+    access_token = None
+    
+    # A. Check GOOGLE_APPLICATION_CREDENTIALS environment variable path
+    env_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if env_credentials_path and os.path.exists(env_credentials_path):
+        try:
+            from google.oauth2 import service_account
+            import google.auth.transport.requests
+            scopes = ["https://www.googleapis.com/auth/drive"]
+            creds = service_account.Credentials.from_service_account_file(env_credentials_path, scopes=scopes)
+            auth_req = google.auth.transport.requests.Request()
+            creds.refresh(auth_req)
+            access_token = creds.token
+        except Exception as auth_err:
+            import logging
+            logging.getLogger(__name__).exception("Authentication failed using GOOGLE_APPLICATION_CREDENTIALS path")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to authenticate using GOOGLE_APPLICATION_CREDENTIALS ({env_credentials_path}): {auth_err}"
+            )
+            
+    # B. Check Service Account JSON file in project root
+    elif os.path.exists("gdrive_credentials.json"):
+        try:
+            from google.oauth2 import service_account
+            import google.auth.transport.requests
+            scopes = ["https://www.googleapis.com/auth/drive"]
+            creds = service_account.Credentials.from_service_account_file("gdrive_credentials.json", scopes=scopes)
+            auth_req = google.auth.transport.requests.Request()
+            creds.refresh(auth_req)
+            access_token = creds.token
+        except Exception as auth_err:
+            import logging
+            logging.getLogger(__name__).exception("Authentication failed using local gdrive_credentials.json")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to authenticate using gdrive_credentials.json: {auth_err}"
+            )
+            
+    # C. Check Refresh Token from environment
+    elif os.getenv("GDRIVE_REFRESH_TOKEN"):
+        client_id = os.getenv("GDRIVE_CLIENT_ID")
+        client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
+        refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
+        
+        if not client_id or not client_secret:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GDRIVE_REFRESH_TOKEN is set but GDRIVE_CLIENT_ID or GDRIVE_CLIENT_SECRET is missing in .env."
+            )
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token"
+                    },
+                    timeout=10.0
+                )
+                res.raise_for_status()
+                access_token = res.json().get("access_token")
+        except Exception as auth_err:
+            import logging
+            logging.getLogger(__name__).exception("Authentication failed using GDRIVE_REFRESH_TOKEN")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to exchange Google OAuth2 refresh token: {auth_err}"
+            )
+            
+    # D. Check Direct Access Token from environment (fallback / testing)
+    elif os.getenv("GDRIVE_ACCESS_TOKEN"):
+        access_token = os.getenv("GDRIVE_ACCESS_TOKEN")
+        
+    # Check if we got a token
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Google Drive credentials are not configured. "
+                "Please configure one of the following methods: "
+                "1. Set GOOGLE_APPLICATION_CREDENTIALS environment variable pointing to a valid service account JSON. "
+                "2. Add 'gdrive_credentials.json' (Google Service Account key file) to your project root folder. "
+                "3. Add GDRIVE_REFRESH_TOKEN, GDRIVE_CLIENT_ID, and GDRIVE_CLIENT_SECRET to your .env file. "
+                "4. Add GDRIVE_ACCESS_TOKEN directly to your .env file."
+            )
+        )
+
+    # 3. Perform multipart/related upload to Drive API
+    try:
+        url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        headers = {
+            "Authorization": f"Bearer {access_token}"
+        }
+        
+        metadata = {
+            "name": filename,
+            "mimeType": "video/mp4"
+        }
+        
+        # Add parent folder if G_DRIVE_FOLDER_ID is set in .env
+        folder_id = os.getenv("G_DRIVE_FOLDER_ID")
+        if folder_id:
+            metadata["parents"] = [folder_id]
+        
+        boundary = "gdrive_upload_boundary_delimiter"
+        headers["Content-Type"] = f"multipart/related; boundary={boundary}"
+        
+        metadata_part = (
+            f"--{boundary}\r\n"
+            "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{json.dumps(metadata)}\r\n"
+        )
+        
+        # Read MP4 bytes
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+            
+        media_part_header = (
+            f"--{boundary}\r\n"
+            "Content-Type: video/mp4\r\n\r\n"
+        )
+        
+        closing = f"\r\n--{boundary}--"
+        
+        payload = (
+            metadata_part.encode("utf-8") +
+            media_part_header.encode("utf-8") +
+            file_bytes +
+            closing.encode("utf-8")
+        )
+        
+        async with httpx.AsyncClient(timeout=None) as client:
+            res = await client.post(
+                url,
+                headers=headers,
+                content=payload
+            )
+            res.raise_for_status()
+            data = res.json()
+            file_id = data.get("id")
+            
+            return {
+                "message": "Video successfully uploaded to Google Drive!",
+                "file_id": file_id,
+                "filename": filename,
+                "view_link": f"https://drive.google.com/file/d/{file_id}/view"
+            }
+            
+    except httpx.HTTPStatusError as exc:
+        import logging
+        logging.getLogger(__name__).exception("Google Drive API responded with HTTP status error")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Google Drive API returned error status {exc.response.status_code}: {exc.response.text}"
+        ) from exc
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("Failed to upload video to Google Drive")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload video to Google Drive: {str(exc)}"
+        ) from exc
+

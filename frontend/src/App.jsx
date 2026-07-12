@@ -19,7 +19,8 @@ import {
   Settings,
   Tv,
   FileText,
-  Layers
+  Layers,
+  Cloud
 } from 'lucide-react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
@@ -75,6 +76,11 @@ function App() {
   const [activeGalleryTab, setActiveGalleryTab] = useState('videos');
   const [lightboxItem, setLightboxItem] = useState(null);
   const [selectedMedia, setSelectedMedia] = useState({}); // { attractionLabel: [asset1, asset2] }
+  
+  // Google Drive upload states
+  const [gdriveUploading, setGdriveUploading] = useState(false);
+  const [gdriveLink, setGdriveLink] = useState(null);
+  const [gdriveError, setGdriveError] = useState(null);
 
   // API timers
   const [chatElapsed, setChatElapsed] = useState(0);      // seconds for chat API
@@ -242,6 +248,31 @@ function App() {
         [label]: next
       };
     });
+  };
+
+  const handleGDriveUpload = async () => {
+    setGdriveUploading(true);
+    setGdriveError(null);
+    setGdriveLink(null);
+
+    try {
+      const res = await fetch('/api/v1/chat/upload-gdrive', {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Google Drive upload failed.');
+      }
+
+      const data = await res.json();
+      setGdriveLink(data.view_link);
+    } catch (err) {
+      console.error(err);
+      setGdriveError(err.message || 'An unexpected error occurred during Google Drive upload.');
+    } finally {
+      setGdriveUploading(false);
+    }
   };
 
   const handleQuickSearch = (term) => {
@@ -619,6 +650,8 @@ function App() {
     setVideoError(null);
     setVideoUrl(null);
     setVideoProgress(0);
+    setGdriveLink(null);
+    setGdriveError(null);
     setCanvasTab('video'); // Switch to video tab to view render progress
 
     // Start video timer
@@ -1531,15 +1564,49 @@ function App() {
                         <h3 style={{ fontSize: '1.2rem', fontWeight: '700', color: '#e2e8f0' }}>Final Render</h3>
                         <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Resolution: {aspectRatio === 'portrait' ? '1080x1920 (Portrait)' : '1920x1080 (Wide)'}</p>
                       </div>
-                      <a
-                        href={videoUrl}
-                        download={`${query.replace(/\s+/g, '_')}_vlog.mp4`}
-                        className="console-btn"
-                        style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'linear-gradient(135deg, #22c55e, #15803d)' }}
-                      >
-                        <Download size={14} />
-                        <span>Download MP4</span>
-                      </a>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <a
+                          href={videoUrl}
+                          download={`${query.replace(/\s+/g, '_')}_vlog.mp4`}
+                          className="console-btn"
+                          style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'linear-gradient(135deg, #22c55e, #15803d)' }}
+                        >
+                          <Download size={14} />
+                          <span>Download MP4</span>
+                        </a>
+
+                        <button
+                          type="button"
+                          onClick={handleGDriveUpload}
+                          disabled={gdriveUploading}
+                          className="console-btn"
+                          style={{ 
+                            padding: '8px 16px', 
+                            fontSize: '0.85rem', 
+                            background: gdriveLink ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                            border: gdriveLink ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(56, 189, 248, 0.4)',
+                            color: gdriveLink ? '#4ade80' : '#38bdf8',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {gdriveUploading ? (
+                            <>
+                              <Loader2 size={14} className="stage-spinner" />
+                              <span>Uploading...</span>
+                            </>
+                          ) : gdriveLink ? (
+                            <>
+                              <span style={{ fontSize: '0.9rem' }}>✓</span>
+                              <span>Uploaded to Drive</span>
+                            </>
+                          ) : (
+                            <>
+                              <Cloud size={14} />
+                              <span>Upload to Drive</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
                     
                     <div className="canvas-video-wrapper">
@@ -1554,6 +1621,78 @@ function App() {
                         }}
                       />
                     </div>
+
+                    {/* Google Drive Status Notification */}
+                    {gdriveLink && (
+                      <div style={{
+                        padding: '12px 16px',
+                        background: 'rgba(34, 197, 94, 0.15)',
+                        border: '1px solid rgba(34, 197, 94, 0.3)',
+                        borderRadius: '8px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '12px',
+                        marginTop: '10px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontSize: '1.2rem' }}>☁️</span>
+                          <span style={{ color: '#4ade80', fontSize: '0.9rem', fontWeight: '600' }}>Video successfully uploaded to Google Drive!</span>
+                        </div>
+                        <a 
+                          href={gdriveLink} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="tab-btn active"
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '0.8rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            border: '1px solid rgba(34, 197, 94, 0.4)',
+                            background: 'rgba(34, 197, 94, 0.1)',
+                            borderRadius: '6px',
+                            textDecoration: 'none',
+                            color: '#4ade80',
+                            fontWeight: '700'
+                          }}
+                        >
+                          <ExternalLink size={12} />
+                          <span>View on Drive</span>
+                        </a>
+                      </div>
+                    )}
+
+                    {gdriveError && (
+                      <div style={{
+                        padding: '12px 16px',
+                        background: 'rgba(239, 68, 68, 0.1)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        borderRadius: '8px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                        marginTop: '10px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <AlertCircle size={16} style={{ color: '#f87171' }} />
+                          <span style={{ color: '#fca5a5', fontSize: '0.9rem', fontWeight: '700' }}>Google Drive Upload Failed</span>
+                        </div>
+                        <pre style={{ 
+                          margin: 0, 
+                          whiteSpace: 'pre-wrap', 
+                          fontFamily: 'monospace', 
+                          fontSize: '0.75rem', 
+                          color: '#fca5a5', 
+                          background: 'rgba(0,0,0,0.3)', 
+                          padding: '8px', 
+                          borderRadius: '6px' 
+                        }}>
+                          {gdriveError}
+                        </pre>
+                      </div>
+                    )}
                   </div>
                 )}
 
