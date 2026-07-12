@@ -14,10 +14,16 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY app ./app
 
 # Copy local data directory into image (background music, transition_sounds, etc.)
-# This ensures the container has those directories available at runtime.
+# Place it under /app/data so application relative paths (data/...) work.
 COPY data /data
-RUN chown -R app:app /data \
+# ensure /data exists and is writable by the app user
+RUN mkdir -p /data \
+    && chown -R app:app /data \
     && chmod -R 775 /data
+
+# Make a symlink so code using relative `data/...` paths continues to work
+RUN rm -rf /app/data || true \
+    && ln -s /data /app/data
 
 
 
