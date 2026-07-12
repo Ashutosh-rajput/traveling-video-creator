@@ -13,6 +13,15 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app ./app
 
+# Copy local data directory into image (background music, transition_sounds, etc.)
+# This ensures the container has those directories available at runtime.
+COPY data /data
+RUN chown -R app:app /data \
+    && chmod -R 775 /data
+
+# Expose data as a volume so it can be mounted at runtime if desired
+VOLUME ["/data"]
+
 USER app
 
 EXPOSE 8000
