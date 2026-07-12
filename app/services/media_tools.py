@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+import re
 
 import httpx
 from langchain_core.tools import tool
@@ -15,6 +16,29 @@ MEDIA_API_TIMEOUT = 8  # seconds – fail fast on slow providers
 
 def _bounded_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
+
+
+_GENERIC_LOCATION_TERMS = frozenset({
+    "beach", "city", "falls", "fort", "garden", "india", "lake", "museum",
+    "national", "palace", "park", "river", "temple", "waterfall", "zoo",
+})
+
+
+def _asset_matches_place(asset: dict[str, Any], place_name: str) -> bool:
+    """Reject provider search results that are clearly unrelated to the requested place."""
+    place_terms = {
+        term
+        for term in re.findall(r"[a-z0-9]+", place_name.lower())
+        if len(term) >= 3 and term not in _GENERIC_LOCATION_TERMS
+    }
+    if not place_terms:
+        return True
+
+    searchable_text = " ".join(
+        str(asset.get(field) or "")
+        for field in ("title", "page_url", "creator")
+    ).lower()
+    return any(term in searchable_text for term in place_terms)
 
 
 def _missing_key(provider: str, env_name: str) -> dict[str, Any]:
@@ -278,15 +302,27 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
                 if isinstance(result, dict):
                     if result.get("error"):
                         errors.append(result["error"])
-                    combined_photos.extend(result.get("photos", []))
-                    combined_videos.extend(result.get("videos", []))
+                    combined_photos.extend(
+                        [{**asset, "provider": provider} for asset in result.get("photos", [])]
+                    )
+                    combined_videos.extend(
+                        [{**asset, "provider": provider} for asset in result.get("videos", [])]
+                    )
             except Exception as e:
                 errors.append(f"{provider}: {e}")
+
+    # Providers sometimes return an attractive but unrelated asset for a place
+    # query. Keep results only when their own metadata supports the location.
+    matched_photos = [asset for asset in combined_photos if _asset_matches_place(asset, place_name)]
+    matched_videos = [asset for asset in combined_videos if _asset_matches_place(asset, place_name)]
+    rejected_count = len(combined_photos) + len(combined_videos) - len(matched_photos) - len(matched_videos)
+    if rejected_count:
+        logger.info("[Media Search] Rejected %s metadata-mismatched assets for '%s'.", rejected_count, place_name)
 
     # Deduplicate videos (matching by video_url)
     unique_videos = []
     seen_video_urls = set()
-    for vid in combined_videos:
+    for vid in matched_videos:
         url = vid.get("video_url")
         if url and url not in seen_video_urls:
             unique_videos.append(vid)
@@ -295,7 +331,7 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
     # Deduplicate photos (matching by image_url)
     unique_photos = []
     seen_photo_urls = set()
-    for pic in combined_photos:
+    for pic in matched_photos:
         url = pic.get("image_url")
         if url and url not in seen_photo_urls:
             unique_photos.append(pic)
@@ -325,4 +361,3 @@ def get_media_tools() -> list[Any]:
     return [
         search_all_place_media,
     ]
-

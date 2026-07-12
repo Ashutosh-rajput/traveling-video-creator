@@ -679,3 +679,44 @@
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
 }
 
+.media-hover-details {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 14px;
+  color: #f8fafc;
+  font-size: 0.76rem;
+  line-height: 1.25;
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.1) 12%, rgba(2, 6, 23, 0.94) 100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.media-hover-details strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+}
+
+.media-hover-details span {
+  color: #cbd5e1;
+}
+
+.media-hover-details a {
+  width: fit-content;
+  margin-top: 3px;
+  color: #38bdf8;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.media-asset-card:hover > .media-hover-details,
+.media-hover-details:focus-within {
+  opacity: 1;
+}

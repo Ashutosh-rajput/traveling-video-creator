@@ -4,6 +4,13 @@ from pydantic import BaseModel, Field
 class MediaAsset(BaseModel):
     url: str
     label: str
+    provider: str | None = None
+    title: str | None = None
+    page_url: str | None = None
+    creator: str | None = None
+    creator_url: str | None = None
+    thumbnail_url: str | None = None
+    duration_seconds: int | None = None
 
 
 class ToolCallData(BaseModel):
@@ -34,4 +41,3 @@ class ChatResponse(BaseModel):
     videos: list[MediaAsset] = Field(default_factory=list)
     tool_data: list[ToolCallData] = Field(default_factory=list)
     video_script: str = ""
-

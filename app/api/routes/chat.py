@@ -1,14 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 import os
+import urllib.parse
 
+from dotenv import set_key
+
+from app.core.config import settings
 from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset
 from app.services.agent import AgentService, get_agent_service
 from app.services.tts import generate_tts
 from app.services.video import generate_travel_video, ensure_transition_sounds
 
 router = APIRouter(tags=["chat"])
+
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
 class TTSRequest(BaseModel):
@@ -30,6 +36,78 @@ class VideoRequest(BaseModel):
     transition_style: str = Field(default="none", description="Visual transition style ('none', 'fade', 'zoom', 'slide').")
     transition_sound: str = Field(default="none", description="Transition sound effect ('none', 'whoosh', 'click', 'glitch').")
     caption_theme: str = Field(default="Neon Yellow (Default)", description="Subtitles visual preset style")
+
+
+@router.get("/login/google")
+async def login_google() -> RedirectResponse:
+    """Start personal Google Drive OAuth and request an offline refresh token."""
+    if not settings.gdrive_client_id or not settings.gdrive_client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET must be configured in .env first.",
+        )
+
+    params = {
+        "client_id": settings.gdrive_client_id,
+        "redirect_uri": settings.gdrive_redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_DRIVE_SCOPE,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    authorization_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+    return RedirectResponse(authorization_url)
+
+
+@router.get("/login/google/callback", response_class=HTMLResponse)
+async def google_login_callback(code: str | None = None, error: str | None = None) -> HTMLResponse:
+    """Exchange Google's authorization code and persist the personal refresh token locally."""
+    if error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Google authorization failed: {error}")
+    if not code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google did not return an authorization code.")
+
+    import httpx
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": settings.gdrive_client_id,
+                "client_secret": settings.gdrive_client_secret,
+                "code": code,
+                "redirect_uri": settings.gdrive_redirect_uri,
+                "grant_type": "authorization_code",
+            },
+        )
+
+    if response.is_error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google could not exchange the authorization code. Check the configured redirect URI and OAuth client.",
+        )
+
+    refresh_token = response.json().get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google did not issue a refresh token. Revoke this app in your Google Account and try Connect Drive again.",
+        )
+
+    env_path = os.path.abspath(".env")
+    set_key(env_path, "GDRIVE_REFRESH_TOKEN", refresh_token)
+    os.environ["GDRIVE_REFRESH_TOKEN"] = refresh_token
+
+    return HTMLResponse(
+        "<h1>Google Drive connected</h1>"
+        "<p>Your personal refresh token has been saved locally. You can close this tab and upload the video from Voyageur AI Studio.</p>"
+    )
+
+
+@router.get("/chat/gdrive-status")
+async def google_drive_status() -> dict[str, bool]:
+    """Expose only whether this local app has a reusable Drive refresh token."""
+    return {"connected": bool(os.getenv("GDRIVE_REFRESH_TOKEN"))}
 
 
 @router.get("/chat/background-music")
@@ -484,10 +562,80 @@ async def search_reddit_endpoint(
         ) from exc
 
 
+# Global dict to track Google Drive upload progress (filename -> status dict)
+gdrive_upload_progress: dict[str, dict] = {}
+
+def set_upload_progress(filename: str, percent: int, stage: str = "uploading", message: str = ""):
+    key = filename.lower().strip()
+    gdrive_upload_progress[key] = {
+        "percent": percent,
+        "stage": stage,
+        "message": message
+    }
+
+def get_upload_progress(filename: str) -> dict:
+    key = filename.lower().strip()
+    return gdrive_upload_progress.get(key, {"percent": 0, "stage": "idle", "message": "No active upload."})
+
+
+class UploadProgressIterable:
+    def __init__(self, metadata_bytes, media_header_bytes, file_path, closing_bytes, callback):
+        import os
+        self.metadata_bytes = metadata_bytes
+        self.media_header_bytes = media_header_bytes
+        self.file_path = file_path
+        self.closing_bytes = closing_bytes
+        self.file_size = os.path.getsize(file_path)
+        self.callback = callback
+        
+        self.total_size = len(metadata_bytes) + len(media_header_bytes) + self.file_size + len(closing_bytes)
+        self.bytes_sent = 0
+
+    async def __aiter__(self):
+        """Stream an async request body compatible with httpx.AsyncClient."""
+        # 1. Send metadata
+        yield self.metadata_bytes
+        self.bytes_sent += len(self.metadata_bytes)
+        self.callback(int((self.bytes_sent / self.total_size) * 100))
+
+        # 2. Send media header
+        yield self.media_header_bytes
+        self.bytes_sent += len(self.media_header_bytes)
+        self.callback(int((self.bytes_sent / self.total_size) * 100))
+
+        # 3. Stream file chunks
+        chunk_size = 512 * 1024  # 512KB chunks
+        with open(self.file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+                self.bytes_sent += len(chunk)
+                self.callback(int((self.bytes_sent / self.total_size) * 100))
+
+        # 4. Send closing boundary
+        yield self.closing_bytes
+        self.bytes_sent += len(self.closing_bytes)
+        self.callback(100)
+
+
+@router.get("/chat/generate-status")
+async def get_generate_status_endpoint(city_name: str):
+    """Retrieve real-time video generation progress for a given city."""
+    from app.services.video import get_generation_progress
+    return get_generation_progress(city_name)
+
+
+@router.get("/chat/upload-gdrive-status")
+async def get_upload_status_endpoint(filename: str):
+    """Retrieve real-time Google Drive upload progress for a given filename."""
+    return get_upload_progress(filename)
+
+
 @router.post("/chat/upload-gdrive")
 async def upload_video_to_gdrive_endpoint():
-    """Find the last generated travel video and upload it to Google Drive."""
-    import os
+    """Upload the latest render to the user's personally connected Google Drive."""
     import json
     import httpx
     
@@ -506,100 +654,54 @@ async def upload_video_to_gdrive_endpoint():
             detail="No compiled MP4 video found in the cache output folder. Please compile a video first."
         )
         
-    # Pick the first video file found
-    filename = files[0]
+    # Use the newest render if the cache happens to contain more than one video.
+    filename = max(files, key=lambda file: os.path.getmtime(os.path.join(output_dir, file)))
     file_path = os.path.join(output_dir, filename)
     
-    # 2. Authenticate & Obtain Google Access Token
-    access_token = None
-    
-    # A. Check GOOGLE_APPLICATION_CREDENTIALS environment variable path
-    env_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if env_credentials_path and os.path.exists(env_credentials_path):
-        try:
-            from google.oauth2 import service_account
-            import google.auth.transport.requests
-            scopes = ["https://www.googleapis.com/auth/drive"]
-            creds = service_account.Credentials.from_service_account_file(env_credentials_path, scopes=scopes)
-            auth_req = google.auth.transport.requests.Request()
-            creds.refresh(auth_req)
-            access_token = creds.token
-        except Exception as auth_err:
-            import logging
-            logging.getLogger(__name__).exception("Authentication failed using GOOGLE_APPLICATION_CREDENTIALS path")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to authenticate using GOOGLE_APPLICATION_CREDENTIALS ({env_credentials_path}): {auth_err}"
+    # 2. Refresh the access token saved by the personal OAuth connection.
+    refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google Drive is not connected. Select Connect Drive and approve access before uploading.",
+        )
+    if not settings.gdrive_client_id or not settings.gdrive_client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GDRIVE_CLIENT_ID or GDRIVE_CLIENT_SECRET is missing from .env.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.gdrive_client_id,
+                    "client_secret": settings.gdrive_client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
             )
-            
-    # B. Check Service Account JSON file in project root
-    elif os.path.exists("gdrive_credentials.json"):
-        try:
-            from google.oauth2 import service_account
-            import google.auth.transport.requests
-            scopes = ["https://www.googleapis.com/auth/drive"]
-            creds = service_account.Credentials.from_service_account_file("gdrive_credentials.json", scopes=scopes)
-            auth_req = google.auth.transport.requests.Request()
-            creds.refresh(auth_req)
-            access_token = creds.token
-        except Exception as auth_err:
-            import logging
-            logging.getLogger(__name__).exception("Authentication failed using local gdrive_credentials.json")
+        if token_response.is_error:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to authenticate using gdrive_credentials.json: {auth_err}"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your Google Drive connection has expired or was revoked. Select Connect Drive to authorize it again.",
             )
-            
-    # C. Check Refresh Token from environment
-    elif os.getenv("GDRIVE_REFRESH_TOKEN"):
-        client_id = os.getenv("GDRIVE_CLIENT_ID")
-        client_secret = os.getenv("GDRIVE_CLIENT_SECRET")
-        refresh_token = os.getenv("GDRIVE_REFRESH_TOKEN")
-        
-        if not client_id or not client_secret:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="GDRIVE_REFRESH_TOKEN is set but GDRIVE_CLIENT_ID or GDRIVE_CLIENT_SECRET is missing in .env."
-            )
-            
-        try:
-            async with httpx.AsyncClient() as client:
-                res = await client.post(
-                    "https://oauth2.googleapis.com/token",
-                    data={
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "refresh_token": refresh_token,
-                        "grant_type": "refresh_token"
-                    },
-                    timeout=10.0
-                )
-                res.raise_for_status()
-                access_token = res.json().get("access_token")
-        except Exception as auth_err:
-            import logging
-            logging.getLogger(__name__).exception("Authentication failed using GDRIVE_REFRESH_TOKEN")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to exchange Google OAuth2 refresh token: {auth_err}"
-            )
-            
-    # D. Check Direct Access Token from environment (fallback / testing)
-    elif os.getenv("GDRIVE_ACCESS_TOKEN"):
-        access_token = os.getenv("GDRIVE_ACCESS_TOKEN")
-        
-    # Check if we got a token
+        access_token = token_response.json().get("access_token")
+    except HTTPException:
+        raise
+    except Exception as auth_err:
+        import logging
+        logging.getLogger(__name__).exception("Authentication failed using the personal Google Drive refresh token")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to refresh the Google Drive connection: {auth_err}",
+        ) from auth_err
+
     if not access_token:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Google Drive credentials are not configured. "
-                "Please configure one of the following methods: "
-                "1. Set GOOGLE_APPLICATION_CREDENTIALS environment variable pointing to a valid service account JSON. "
-                "2. Add 'gdrive_credentials.json' (Google Service Account key file) to your project root folder. "
-                "3. Add GDRIVE_REFRESH_TOKEN, GDRIVE_CLIENT_ID, and GDRIVE_CLIENT_SECRET to your .env file. "
-                "4. Add GDRIVE_ACCESS_TOKEN directly to your .env file."
-            )
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google did not return an access token.",
         )
 
     # 3. Perform multipart/related upload to Drive API
@@ -628,10 +730,6 @@ async def upload_video_to_gdrive_endpoint():
             f"{json.dumps(metadata)}\r\n"
         )
         
-        # Read MP4 bytes
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
-            
         media_part_header = (
             f"--{boundary}\r\n"
             "Content-Type: video/mp4\r\n\r\n"
@@ -639,22 +737,39 @@ async def upload_video_to_gdrive_endpoint():
         
         closing = f"\r\n--{boundary}--"
         
-        payload = (
-            metadata_part.encode("utf-8") +
-            media_part_header.encode("utf-8") +
-            file_bytes +
-            closing.encode("utf-8")
+        # Encode parts to bytes
+        metadata_bytes = metadata_part.encode("utf-8")
+        media_header_bytes = media_part_header.encode("utf-8")
+        closing_bytes = closing.encode("utf-8")
+        
+        # Start progress at 0%
+        set_upload_progress(filename, 0, "uploading", f"Starting upload of '{filename}'...")
+        
+        def progress_callback(percent):
+            set_upload_progress(filename, percent, "uploading", f"Uploading '{filename}' ({percent}%)...")
+            
+        payload_iterable = UploadProgressIterable(
+            metadata_bytes=metadata_bytes,
+            media_header_bytes=media_header_bytes,
+            file_path=file_path,
+            closing_bytes=closing_bytes,
+            callback=progress_callback
         )
+        
+        headers["Content-Length"] = str(payload_iterable.total_size)
         
         async with httpx.AsyncClient(timeout=None) as client:
             res = await client.post(
                 url,
                 headers=headers,
-                content=payload
+                content=payload_iterable
             )
             res.raise_for_status()
             data = res.json()
             file_id = data.get("id")
+            
+            # Completion status
+            set_upload_progress(filename, 100, "completed", "Upload completed successfully!")
             
             return {
                 "message": "Video successfully uploaded to Google Drive!",
@@ -677,4 +792,3 @@ async def upload_video_to_gdrive_endpoint():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload video to Google Drive: {str(exc)}"
         ) from exc
-

@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     sarvam_speaker: str = "shubh"
     sarvam_model: str = "bulbul:v3"
 
+    # Personal Google Drive OAuth configuration. Create an OAuth "Desktop/Web"
+    # client in Google Cloud and register this callback URL there.
+    gdrive_client_id: str = Field(default="", repr=False)
+    gdrive_client_secret: str = Field(default="", repr=False)
+    gdrive_redirect_uri: str = "http://localhost:8000/api/v1/login/google/callback"
+
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",

@@ -283,12 +283,31 @@ class AgentService:
                             for photo in data.get("photos", []):
                                 url = photo.get("image_url") or photo.get("src", {}).get("large")
                                 if url:
-                                    pics.append(MediaAsset(url=url, label=label))
+                                    pics.append(MediaAsset(
+                                        url=url,
+                                        label=label,
+                                        provider=photo.get("provider") or data.get("provider"),
+                                        title=photo.get("title"),
+                                        page_url=photo.get("page_url"),
+                                        creator=photo.get("creator"),
+                                        creator_url=photo.get("creator_url"),
+                                        thumbnail_url=photo.get("thumbnail_url"),
+                                    ))
                             # Extract videos
                             for video in data.get("videos", []):
                                 url = video.get("video_url") or video.get("link")
                                 if url:
-                                    videos.append(MediaAsset(url=url, label=label))
+                                    videos.append(MediaAsset(
+                                        url=url,
+                                        label=label,
+                                        provider=video.get("provider") or data.get("provider"),
+                                        title=video.get("title"),
+                                        page_url=video.get("page_url"),
+                                        creator=video.get("creator"),
+                                        creator_url=video.get("creator_url"),
+                                        thumbnail_url=video.get("thumbnail_url"),
+                                        duration_seconds=video.get("duration_seconds"),
+                                    ))
                     except Exception:
                         # Capture raw content if JSON load fails
                         if payload.debug:
@@ -433,4 +452,3 @@ class AgentService:
 @lru_cache
 def get_agent_service() -> AgentService:
     return AgentService(settings)
-

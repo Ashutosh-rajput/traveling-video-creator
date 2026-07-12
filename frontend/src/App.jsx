@@ -25,6 +25,27 @@ import {
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 
+function MediaHoverDetails({ asset, type }) {
+  const provider = asset.provider && asset.provider !== 'combined'
+    ? asset.provider.charAt(0).toUpperCase() + asset.provider.slice(1)
+    : null;
+
+  return (
+    <div className="media-hover-details">
+      <strong>{asset.title || asset.label}</strong>
+      <span>{type === 'video' ? 'Video clip' : 'Photo'} · {asset.label}</span>
+      {provider && <span>Source: {provider}</span>}
+      {asset.creator && <span>Creator: {asset.creator}</span>}
+      {type === 'video' && asset.duration_seconds && <span>Duration: {asset.duration_seconds}s</span>}
+      {asset.page_url && (
+        <a href={asset.page_url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>
+          View source ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -81,6 +102,11 @@ function App() {
   const [gdriveUploading, setGdriveUploading] = useState(false);
   const [gdriveLink, setGdriveLink] = useState(null);
   const [gdriveError, setGdriveError] = useState(null);
+  const [gdriveConnected, setGdriveConnected] = useState(false);
+
+  // Real-time progress monitoring states
+  const [realProgress, setRealProgress] = useState({ percent: 0, stage: 'idle', message: '' });
+  const [uploadProgress, setUploadProgress] = useState({ percent: 0, stage: 'idle', message: '' });
 
   // API timers
   const [chatElapsed, setChatElapsed] = useState(0);      // seconds for chat API
@@ -200,14 +226,16 @@ function App() {
       uniqueLabels.forEach(label => {
         const placeVideos = (data.videos || []).filter(v => v.label === label);
         const placePhotos = (data.pics || []).filter(p => p.label === label);
+        const videoAssets = placeVideos.map(asset => ({ ...asset, type: 'video' }));
+        const photoAssets = placePhotos.map(asset => ({ ...asset, type: 'photo' }));
         
         let selected = [];
-        if (placeVideos.length >= 2) {
-          selected = placeVideos.slice(0, 2);
-        } else if (placeVideos.length === 1) {
-          selected = [placeVideos[0], ...placePhotos.slice(0, 1)];
+        if (videoAssets.length >= 2) {
+          selected = videoAssets.slice(0, 2);
+        } else if (videoAssets.length === 1) {
+          selected = [videoAssets[0], ...photoAssets.slice(0, 1)];
         } else {
-          selected = placePhotos.slice(0, 2);
+          selected = photoAssets.slice(0, 2);
         }
         initialSelected[label] = selected;
       });
@@ -227,20 +255,24 @@ function App() {
   const handleToggleMedia = (label, asset) => {
     setSelectedMedia(prev => {
       const current = prev[label] || [];
-      const assetUrl = asset.video_url || asset.image_url || asset.url;
-      const exists = current.some(item => (item.video_url || item.image_url || item.url) === assetUrl);
+      const assetUrl = asset.url || asset.video_url || asset.image_url;
+      const assetType = asset.type || (asset.video_url ? 'video' : 'photo');
+      if (!assetUrl) return prev;
+
+      const normalizedAsset = { ...asset, url: assetUrl, type: assetType };
+      const exists = current.some(item => item.url === assetUrl && item.type === assetType);
       
       let next = [];
       if (exists) {
         // Remove it
-        next = current.filter(item => (item.video_url || item.image_url || item.url) !== assetUrl);
+        next = current.filter(item => !(item.url === assetUrl && item.type === assetType));
       } else {
         // Add it
         if (current.length >= 2) {
           // FIFO: remove oldest, add new
-          next = [current[1], asset];
+          next = [current[1], normalizedAsset];
         } else {
-          next = [...current, asset];
+          next = [...current, normalizedAsset];
         }
       }
       return {
@@ -254,11 +286,27 @@ function App() {
     setGdriveUploading(true);
     setGdriveError(null);
     setGdriveLink(null);
+    setUploadProgress({ percent: 0, stage: 'uploading', message: 'Initiating upload...' });
+
+    // Start status polling
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch('/api/v1/chat/upload-gdrive-status?filename=travel_guide.mp4');
+        if (statusRes.ok) {
+          const progressData = await statusRes.json();
+          setUploadProgress(progressData);
+        }
+      } catch (err) {
+        console.error("Failed to poll upload status", err);
+      }
+    }, 2000);
 
     try {
       const res = await fetch('/api/v1/chat/upload-gdrive', {
         method: 'POST',
       });
+
+      clearInterval(pollInterval);
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -267,12 +315,19 @@ function App() {
 
       const data = await res.json();
       setGdriveLink(data.view_link);
+      setUploadProgress({ percent: 100, stage: 'completed', message: 'Upload completed!' });
     } catch (err) {
+      clearInterval(pollInterval);
       console.error(err);
       setGdriveError(err.message || 'An unexpected error occurred during Google Drive upload.');
+      setUploadProgress({ percent: 0, stage: 'error', message: err.message || 'Upload failed.' });
     } finally {
       setGdriveUploading(false);
     }
+  };
+
+  const connectGoogleDrive = () => {
+    window.open('/api/v1/login/google', 'google-drive-oauth', 'popup,width=600,height=720');
   };
 
   const handleQuickSearch = (term) => {
@@ -403,6 +458,16 @@ function App() {
         }
       })
       .catch(err => console.error("Error checking cached video:", err));
+
+    const refreshDriveStatus = () => {
+      fetch('/api/v1/chat/gdrive-status')
+        .then(res => res.ok ? res.json() : { connected: false })
+        .then(data => setGdriveConnected(Boolean(data.connected)))
+        .catch(() => setGdriveConnected(false));
+    };
+    refreshDriveStatus();
+    window.addEventListener('focus', refreshDriveStatus);
+    return () => window.removeEventListener('focus', refreshDriveStatus);
   }, []);
 
   const toggleMusicPreview = () => {
@@ -636,15 +701,6 @@ function App() {
       setLoading(false);
     }
   };
-  // Video generation progress simulation stages
-  const videoStages = [
-    "Parsing script segments...",
-    "Generating voiceover audio...",
-    "Downloading media assets...",
-    "Compiling video timeline...",
-    "Rendering final video..."
-  ];
-
   const handleGenerateVideo = async () => {
     setVideoGenerating(true);
     setVideoError(null);
@@ -652,19 +708,25 @@ function App() {
     setVideoProgress(0);
     setGdriveLink(null);
     setGdriveError(null);
+    setRealProgress({ percent: 0, stage: 'parsing', message: 'Starting script segments parsing...' });
     setCanvasTab('video'); // Switch to video tab to view render progress
 
     // Start video timer
     setVideoElapsed(0);
     videoTimerRef.current = setInterval(() => setVideoElapsed(s => s + 1), 1000);
 
-    // Progress simulation timer
-    const progressInterval = setInterval(() => {
-      setVideoProgress((prev) => {
-        if (prev < videoStages.length - 1) return prev + 1;
-        return prev;
-      });
-    }, 8000);
+    // Real-time status polling (every 5 seconds)
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`/api/v1/chat/generate-status?city_name=${encodeURIComponent(query)}`);
+        if (statusRes.ok) {
+          const progressData = await statusRes.json();
+          setRealProgress(progressData);
+        }
+      } catch (err) {
+        console.error("Failed to poll video generation status", err);
+      }
+    }, 5000);
 
     try {
       // Extract selected assets from selectedMedia dictionary
@@ -674,16 +736,16 @@ function App() {
       Object.values(selectedMedia).forEach(assets => {
         if (Array.isArray(assets)) {
           assets.forEach(asset => {
-            if (asset.video_url) {
+            if (asset.type === 'video') {
               // Video asset
               finalSelectedVids.push({
-                url: asset.video_url,
+                url: asset.url,
                 label: asset.label
               });
             } else {
               // Photo asset
               finalSelectedPics.push({
-                url: asset.image_url || asset.url,
+                url: asset.url,
                 label: asset.label
               });
             }
@@ -710,7 +772,7 @@ function App() {
         }),
       });
 
-      clearInterval(progressInterval);
+      clearInterval(pollInterval);
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -720,11 +782,12 @@ function App() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       setVideoUrl(url);
-      setVideoProgress(videoStages.length - 1);
+      setRealProgress({ percent: 100, stage: 'completed', message: 'Video compiled successfully!' });
     } catch (err) {
-      clearInterval(progressInterval);
+      clearInterval(pollInterval);
       console.error(err);
       setVideoError(err.message || 'Video generation failed.');
+      setRealProgress({ percent: 0, stage: 'error', message: err.message || 'Generation failed.' });
     } finally {
       setVideoGenerating(false);
       clearInterval(videoTimerRef.current);
@@ -1527,18 +1590,45 @@ function App() {
                         <Loader2 size={18} className="stage-spinner" />
                         <span style={{ fontWeight: '700', fontSize: '0.95rem', color: '#e2e8f0' }}>Rendering Vlog Timeline...</span>
                       </div>
-                      {videoStages.map((stage, idx) => (
-                        <div key={idx} className="stage-item" style={{ opacity: idx <= videoProgress ? 1 : 0.35, marginBottom: '8px' }}>
-                          {idx < videoProgress ? (
-                            <span className="stage-check">✓</span>
-                          ) : idx === videoProgress ? (
-                            <Loader2 size={14} className="stage-spinner" />
-                          ) : (
-                            <span style={{ width: '16px', display: 'inline-block', textAlign: 'center' }}>○</span>
-                          )}
-                          <span style={{ marginLeft: '8px', fontSize: '0.9rem', color: idx <= videoProgress ? '#e2e8f0' : '#64748b' }}>{stage}</span>
+                      <div style={{ marginBottom: '16px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                          <span style={{ fontSize: '0.85rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700', letterSpacing: '0.05em' }}>
+                            {realProgress.stage === 'rendering' ? '🎬 Rendering Video' : '⚙️ Preparing Assets'}
+                          </span>
+                          <span style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--primary-color)' }}>
+                            {realProgress.percent}%
+                          </span>
                         </div>
-                      ))}
+                        {/* Progress Bar Container */}
+                        <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '999px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.05)' }}>
+                          <div style={{ 
+                            width: `${realProgress.percent}%`, 
+                            height: '100%', 
+                            background: 'linear-gradient(90deg, var(--primary-color), var(--primary-light))', 
+                            borderRadius: '999px',
+                            transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)'
+                          }} />
+                        </div>
+                      </div>
+
+                      {/* Detail Message */}
+                      <div style={{ 
+                        padding: '10px 14px', 
+                        background: 'rgba(0, 0, 0, 0.25)', 
+                        border: '1px solid rgba(255, 255, 255, 0.05)', 
+                        borderRadius: '8px', 
+                        fontSize: '0.85rem', 
+                        color: '#cbd5e1',
+                        fontFamily: 'monospace',
+                        minHeight: '40px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        lineHeight: '1.4'
+                      }}>
+                        <Loader2 size={12} className="stage-spinner" />
+                        <span>{realProgress.message || 'Initializing pipeline...'}</span>
+                      </div>
                       <div style={{ 
                         marginTop: '16px', 
                         paddingTop: '10px',
@@ -1578,7 +1668,7 @@ function App() {
                         <button
                           type="button"
                           onClick={handleGDriveUpload}
-                          disabled={gdriveUploading}
+                          disabled={gdriveUploading || !gdriveConnected}
                           className="console-btn"
                           style={{ 
                             padding: '8px 16px', 
@@ -1606,8 +1696,29 @@ function App() {
                             </>
                           )}
                         </button>
+                        <button
+                          type="button"
+                          onClick={connectGoogleDrive}
+                          className="console-btn"
+                          style={{
+                            padding: '8px 16px',
+                            fontSize: '0.85rem',
+                            background: gdriveConnected ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                            border: gdriveConnected ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(56, 189, 248, 0.4)',
+                            color: gdriveConnected ? '#4ade80' : '#38bdf8',
+                          }}
+                        >
+                          <Cloud size={14} />
+                          <span>{gdriveConnected ? 'Drive Connected' : 'Connect Drive'}</span>
+                        </button>
                       </div>
                     </div>
+
+                    {!gdriveConnected && (
+                      <p style={{ margin: 0, color: '#94a3b8', fontSize: '0.8rem' }}>
+                        Connect your personal Google Drive once to enable uploads.
+                      </p>
+                    )}
                     
                     <div className="canvas-video-wrapper">
                       <video
@@ -1621,6 +1732,44 @@ function App() {
                         }}
                       />
                     </div>
+
+                    {/* Google Drive Uploading Progress */}
+                    {gdriveUploading && (
+                      <div style={{
+                        padding: '16px',
+                        background: 'rgba(56, 189, 248, 0.08)',
+                        border: '1px solid rgba(56, 189, 248, 0.25)',
+                        borderRadius: '10px',
+                        marginTop: '10px'
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Loader2 size={16} className="stage-spinner" />
+                            <span style={{ fontSize: '0.85rem', color: '#cbd5e1', fontWeight: '700' }}>
+                              Uploading Vlog to Google Drive...
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#38bdf8' }}>
+                            {uploadProgress.percent}%
+                          </span>
+                        </div>
+                        
+                        {/* Progress Bar Track */}
+                        <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '999px', overflow: 'hidden', marginBottom: '8px' }}>
+                          <div style={{
+                            width: `${uploadProgress.percent}%`,
+                            height: '100%',
+                            background: 'linear-gradient(90deg, #38bdf8, #0ea5e9)',
+                            borderRadius: '999px',
+                            transition: 'width 0.3s ease-out'
+                          }} />
+                        </div>
+                        
+                        <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontFamily: 'monospace' }}>
+                          {uploadProgress.message || 'Connecting to Google Drive API...'}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Google Drive Status Notification */}
                     {gdriveLink && (
@@ -1836,16 +1985,17 @@ function App() {
                         <div 
                           style={{ 
                             display: 'grid', 
-                            gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', 
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', 
                             gap: '14px' 
                           }}
                         >
                           {/* Video candidates (Up to 5) */}
                           {placeVideos.map((vid, i) => {
-                            const isSelected = selected.some(item => item.video_url === vid.video_url);
+                            const isSelected = selected.some(item => item.type === 'video' && item.url === vid.url);
                             return (
                               <div
                                 key={`vid-${i}`}
+                                className="media-asset-card"
                                 style={{
                                   position: 'relative',
                                   borderRadius: '10px',
@@ -1857,7 +2007,7 @@ function App() {
                                   aspectRatio: '16/10',
                                   transition: 'all 0.2s ease'
                                 }}
-                                onClick={() => handleToggleMedia(label, vid)}
+                                onClick={() => handleToggleMedia(label, { ...vid, type: 'video' })}
                                 onMouseEnter={(e) => {
                                   const v = e.currentTarget.querySelector('video');
                                   if (v) v.play().catch(() => {});
@@ -1868,11 +2018,12 @@ function App() {
                                 }}
                               >
                                 <video
-                                  src={vid.video_url}
+                                  src={vid.url}
                                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                                   muted
                                   playsInline
                                 />
+                                <MediaHoverDetails asset={vid} type="video" />
                                 
                                 {/* Video indicator label */}
                                 <div style={{ position: 'absolute', bottom: '6px', left: '6px', background: 'rgba(15, 23, 42, 0.75)', color: '#38bdf8', fontSize: '0.65rem', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(56,189,248,0.2)', fontWeight: '700' }}>
@@ -1896,7 +2047,7 @@ function App() {
                                   }}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setLightboxItem({ type: 'video', url: vid.video_url });
+                                    setLightboxItem({ type: 'video', url: vid.url });
                                   }}
                                   title="Enlarge Video"
                                 >
@@ -1931,10 +2082,11 @@ function App() {
 
                           {/* Photo candidates (Up to 3) */}
                           {placePhotos.map((pic, i) => {
-                            const isSelected = selected.some(item => item.image_url === pic.image_url);
+                            const isSelected = selected.some(item => item.type === 'photo' && item.url === pic.url);
                             return (
                               <div
                                 key={`pic-${i}`}
+                                className="media-asset-card"
                                 style={{
                                   position: 'relative',
                                   borderRadius: '10px',
@@ -1946,14 +2098,15 @@ function App() {
                                   aspectRatio: '16/10',
                                   transition: 'all 0.2s ease'
                                 }}
-                                onClick={() => handleToggleMedia(label, pic)}
+                                onClick={() => handleToggleMedia(label, { ...pic, type: 'photo' })}
                               >
                                 <img
-                                  src={pic.image_url}
+                                  src={pic.url}
                                   alt=""
                                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                                   loading="lazy"
                                 />
+                                <MediaHoverDetails asset={pic} type="photo" />
 
                                 {/* Photo indicator label */}
                                 <div style={{ position: 'absolute', bottom: '6px', left: '6px', background: 'rgba(15, 23, 42, 0.75)', color: '#fbbf24', fontSize: '0.65rem', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(251,191,36,0.2)', fontWeight: '700' }}>
@@ -1977,7 +2130,7 @@ function App() {
                                   }}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setLightboxItem({ type: 'photo', url: pic.image_url });
+                                    setLightboxItem({ type: 'photo', url: pic.url });
                                   }}
                                   title="Enlarge Photo"
                                 >

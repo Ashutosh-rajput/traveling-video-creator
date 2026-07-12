@@ -28,6 +28,42 @@ from moviepy.video.fx import CrossFadeIn
 from PIL import Image, ImageDraw, ImageFont
 
 from app.services.tts import generate_tts
+from proglog import ProgressBarLogger
+
+# Global video generation progress tracker mapping (city_name -> status dict)
+generation_progress: dict[str, dict] = {}
+
+def set_generation_progress(city_name: str, stage: str, percent: int, message: str):
+    key = city_name.lower().strip()
+    generation_progress[key] = {
+        "stage": stage,
+        "percent": percent,
+        "message": message
+    }
+
+def get_generation_progress(city_name: str) -> dict:
+    key = city_name.lower().strip()
+    return generation_progress.get(key, {"stage": "idle", "percent": 0, "message": "No active project."})
+
+
+class MoviePyProgressLogger(ProgressBarLogger):
+    def __init__(self, city_name):
+        super().__init__()
+        self.city_name = city_name
+
+    def callback(self, **changes):
+        for bar_name, bar in self.state.get("bars", {}).items():
+            if bar_name == "t":  # "t" is the rendering progress bar name in MoviePy
+                total = bar.get("total", 1)
+                index = bar.get("index", 0)
+                percent = 55 + int((index / max(total, 1)) * 44)  # 55% to 99%
+                set_generation_progress(
+                    self.city_name,
+                    "rendering",
+                    percent,
+                    f"Rendering video frame {index}/{total}..."
+                )
+
 
 # ===========================================================================
 # CAPTION STYLE CONFIGURATION OPTIONS
@@ -352,11 +388,21 @@ def generate_segment_audios(
     segments: list[ScriptSegment],
     speaker: str | None = None,
     language_code: str | None = None,
+    city_name: str | None = None,
 ) -> bytes:
     """Generate TTS for each segment, store audio_bytes & duration,
     and return the combined WAV audio (with silence gaps)."""
 
-    for seg in segments:
+    total = len(segments)
+    for i, seg in enumerate(segments):
+        if city_name:
+            percent = 10 + int((i / total) * 15)  # 10% to 25%
+            set_generation_progress(
+                city_name,
+                "voiceover",
+                percent,
+                f"Generating voiceover audio for '{seg.attraction_name}' ({i+1}/{total})..."
+            )
         seg.audio_bytes = generate_tts(
             seg.narration_text,
             speaker=speaker,
@@ -431,6 +477,7 @@ def download_media_for_segments(
     pics: list[dict],
     videos: list[dict],
     work_dir: Path,
+    city_name: str | None = None,
 ) -> dict[str, dict]:
     """Download media grouped by attraction name.
 
@@ -489,8 +536,13 @@ def download_media_for_segments(
             download_tasks.append((v["url"], dest, name, "videos"))
 
     logger.info(f"[Video Gen] Downloading {len(download_tasks)} media assets concurrently...")
+    
+    total_tasks = len(download_tasks)
+    if total_tasks > 0 and city_name:
+        set_generation_progress(city_name, "downloading", 25, f"Starting media downloads (0/{total_tasks} completed)...")
 
     # Download concurrently
+    completed_count = 0
     with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as pool:
         futures = {}
         for url, dest, name, media_type in download_tasks:
@@ -501,6 +553,15 @@ def download_media_for_segments(
             dest, name, media_type = futures[fut]
             if fut.result():
                 media_map[name][media_type].append(dest)
+            completed_count += 1
+            if city_name and total_tasks > 0:
+                percent = 25 + int((completed_count / total_tasks) * 30)  # 25% to 55%
+                set_generation_progress(
+                    city_name,
+                    "downloading",
+                    percent,
+                    f"Downloading media files ({completed_count}/{total_tasks} completed)..."
+                )
 
     return media_map
 
@@ -1137,6 +1198,7 @@ def compile_video(
         final_video = final_video.with_audio(fallback_audio)
 
     # Write the output
+    moviepy_logger = MoviePyProgressLogger(city_name) if city_name else None
     final_video.write_videofile(
         output_path,
         fps=FPS,
@@ -1144,7 +1206,7 @@ def compile_video(
         audio_codec="aac",
         threads=8,
         preset="ultrafast",
-        logger=None,
+        logger=moviepy_logger,
         ffmpeg_params=["-pix_fmt", "yuv420p"]
     )
 
@@ -1256,6 +1318,8 @@ def generate_travel_video(
 
     try:
         # Step 1: Parse script
+        if city_name:
+            set_generation_progress(city_name, "parsing", 5, "Parsing script segments...")
         logger.info("[Video Gen] Step 1/5 — Parsing script segments...")
         segments = parse_script_segments(script)
         if not segments:
@@ -1265,7 +1329,7 @@ def generate_travel_video(
 
         # Step 2: Generate TTS audio for each segment
         logger.info(f"[Video Gen] Step 2/5 — Generating TTS audio for {len(segments)} segments (speaker={speaker}, lang={language_code})...")
-        combined_audio = generate_segment_audios(segments, speaker=speaker, language_code=language_code)
+        combined_audio = generate_segment_audios(segments, speaker=speaker, language_code=language_code, city_name=city_name)
         total_dur = sum(s.audio_duration for s in segments)
         audio_path = str(work_dir / "voiceover.wav")
         Path(audio_path).write_bytes(combined_audio)
@@ -1273,7 +1337,7 @@ def generate_travel_video(
 
         # Step 3: Download media
         logger.info(f"[Video Gen] Step 3/5 — Downloading media assets for {len(segments)} segments...")
-        media_map = download_media_for_segments(segments, pics, videos, work_dir)
+        media_map = download_media_for_segments(segments, pics, videos, work_dir, city_name=city_name)
         for seg_name, assets in media_map.items():
             logger.info(f"[Video Gen]   '{seg_name}': {len(assets['videos'])} videos, {len(assets['images'])} images downloaded.")
 
@@ -1293,6 +1357,8 @@ def generate_travel_video(
         )
 
         # Step 5: Return video bytes
+        if city_name:
+            set_generation_progress(city_name, "completed", 100, "Video compiled successfully!")
         size_mb = Path(output_path).stat().st_size / (1024 * 1024)
         logger.info(f"[Video Gen] Step 5/5 — Done! Output: '{output_path}' ({size_mb:.1f} MB). Returning video bytes.")
         return Path(output_path).read_bytes()

@@ -114,6 +114,14 @@ npm run dev
 npm run build
 ```
 
+### Connect your personal Google Drive
+
+1. In Google Cloud Console, create an OAuth 2.0 Web application client and add `http://localhost:8000/api/v1/login/google/callback` as an authorized redirect URI.
+2. Set `GDRIVE_CLIENT_ID` and `GDRIVE_CLIENT_SECRET` in `.env`.
+3. Start the backend, then select **Connect Drive** in the video controls (or visit `http://localhost:8000/api/v1/login/google`). Approve access with your personal Google account.
+
+The callback saves `GDRIVE_REFRESH_TOKEN` to the local `.env`; subsequent uploads use it automatically. Keep `.env` private.
+
 ---
 
 ## 🧪 Testing
