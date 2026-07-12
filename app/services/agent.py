@@ -223,6 +223,10 @@ class AgentService:
         logger.info(f"[Agent] Options — Lang: {payload.language}, Places: {payload.num_places}, Length: {payload.video_length}")
         logger.info("[Agent] Consulting LLM and preparing tool calls...")
 
+        # Set the context-local current city name for query sanitization in search tools
+        from app.services.media_tools import set_current_city
+        set_current_city(payload.message)
+
         # Dynamically compile the prompt and create a request-specific agent instance
         system_prompt = self._compile_prompt(
             language=payload.language,
