@@ -25,6 +25,18 @@ import {
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 
+// Use Vite env var `VITE_API_URL` at runtime/build. If empty, fall back to the production default.
+const DEFAULT_API_BASE = 'https://traveling-video-creator-production.up.railway.app';
+const API_BASE = (typeof import.meta !== 'undefined')
+  ? (import.meta.env.VITE_API_URL && import.meta.env.VITE_API_URL.length > 0 ? import.meta.env.VITE_API_URL : DEFAULT_API_BASE)
+  : DEFAULT_API_BASE;
+const buildUrl = (path) => {
+  if (!path) return path;
+  if (!API_BASE) return path;
+  if (API_BASE.endsWith('/') && path.startsWith('/')) return API_BASE.slice(0, -1) + path;
+  return API_BASE + path;
+};
+
 function MediaHoverDetails({ asset, type }) {
   const provider = asset.provider && asset.provider !== 'combined'
     ? asset.provider.charAt(0).toUpperCase() + asset.provider.slice(1)
@@ -190,7 +202,7 @@ function App() {
     chatTimerRef.current = setInterval(() => setChatElapsed(s => s + 1), 1000);
 
     try {
-      const response = await fetch('/api/v1/chat', {
+      const response = await fetch(buildUrl('/api/v1/chat'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -291,7 +303,7 @@ function App() {
     // Start status polling
     const pollInterval = setInterval(async () => {
       try {
-        const statusRes = await fetch('/api/v1/chat/upload-gdrive-status?filename=travel_guide.mp4');
+        const statusRes = await fetch(buildUrl('/api/v1/chat/upload-gdrive-status?filename=travel_guide.mp4'));
         if (statusRes.ok) {
           const progressData = await statusRes.json();
           setUploadProgress(progressData);
@@ -302,7 +314,7 @@ function App() {
     }, 2000);
 
     try {
-      const res = await fetch('/api/v1/chat/upload-gdrive', {
+      const res = await fetch(buildUrl('/api/v1/chat/upload-gdrive'), {
         method: 'POST',
       });
 
@@ -327,7 +339,7 @@ function App() {
   };
 
   const connectGoogleDrive = () => {
-    window.open('/api/v1/login/google', 'google-drive-oauth', 'popup,width=600,height=720');
+    window.open(buildUrl('/api/v1/login/google'), 'google-drive-oauth', 'popup,width=600,height=720');
   };
 
   const handleQuickSearch = (term) => {
@@ -352,7 +364,7 @@ function App() {
 
     setTtsLoading(true);
     try {
-      const res = await fetch('/api/v1/tts', {
+      const res = await fetch(buildUrl('/api/v1/tts'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -431,7 +443,7 @@ function App() {
 
   // Load background music and transition sound options dynamically on mount and check for cached last video
   useEffect(() => {
-    fetch('/api/v1/chat/background-music')
+    fetch(buildUrl('/api/v1/chat/background-music'))
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -440,7 +452,7 @@ function App() {
       })
       .catch(err => console.error("Error loading background music tracks:", err));
 
-    fetch('/api/v1/chat/transition-sounds')
+    fetch(buildUrl('/api/v1/chat/transition-sounds'))
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -450,17 +462,17 @@ function App() {
       .catch(err => console.error("Error loading transition sounds:", err));
 
     // Check if a last generated video exists in the backend cache
-    fetch('/api/v1/chat/last-video', { method: 'HEAD' })
+    fetch(buildUrl('/api/v1/chat/last-video'), { method: 'HEAD' })
       .then(res => {
         if (res.ok) {
-          setVideoUrl('/api/v1/chat/last-video');
+          setVideoUrl(buildUrl('/api/v1/chat/last-video'));
           setCanvasTab('video');
         }
       })
       .catch(err => console.error("Error checking cached video:", err));
 
     const refreshDriveStatus = () => {
-      fetch('/api/v1/chat/gdrive-status')
+      fetch(buildUrl('/api/v1/chat/gdrive-status'))
         .then(res => res.ok ? res.json() : { connected: false })
         .then(data => setGdriveConnected(Boolean(data.connected)))
         .catch(() => setGdriveConnected(false));
@@ -482,7 +494,7 @@ function App() {
       
       const selectedTrack = musicTracks.find(t => t.id === musicMood);
       const filename = selectedTrack ? selectedTrack.filename : `${musicMood}.mp3`;
-      const audioUrl = `/api/v1/chat/background-music/file/${filename}`;
+      const audioUrl = buildUrl(`/api/v1/chat/background-music/file/${filename}`);
       const audio = new Audio(audioUrl);
       audio.volume = musicVolume;
       audio.loop = true;
@@ -518,7 +530,7 @@ function App() {
       
       const selectedSound = transitionSounds.find(t => t.id === transitionSound);
       const filename = selectedSound ? selectedSound.filename : `${transitionSound}.wav`;
-      const audioUrl = `/api/v1/chat/transition-sounds/file/${filename}`;
+      const audioUrl = buildUrl(`/api/v1/chat/transition-sounds/file/${filename}`);
       const audio = new Audio(audioUrl);
       audio.volume = 0.8;
       
@@ -545,7 +557,7 @@ function App() {
 
     try {
       setLoading(true);
-      const res = await fetch('/api/v1/chat/background-music/upload', {
+      const res = await fetch(buildUrl('/api/v1/chat/background-music/upload'), {
         method: 'POST',
         body: formData
       });
@@ -558,7 +570,7 @@ function App() {
       const result = await res.json();
       
       // Reload tracks
-      const listRes = await fetch('/api/v1/chat/background-music');
+      const listRes = await fetch(buildUrl('/api/v1/chat/background-music'));
       const listData = await listRes.json();
       if (Array.isArray(listData)) {
         setMusicTracks(listData);
@@ -591,7 +603,7 @@ function App() {
         setPreviewAudio(null);
       }
 
-      const res = await fetch(`/api/v1/chat/background-music/file/${selectedTrack.filename}`, {
+      const res = await fetch(buildUrl(`/api/v1/chat/background-music/file/${selectedTrack.filename}`), {
         method: 'DELETE'
       });
 
@@ -601,7 +613,7 @@ function App() {
       }
 
       // Reload tracks list
-      const listRes = await fetch('/api/v1/chat/background-music');
+      const listRes = await fetch(buildUrl('/api/v1/chat/background-music'));
       const listData = await listRes.json();
       if (Array.isArray(listData)) {
         setMusicTracks(listData);
@@ -624,7 +636,7 @@ function App() {
 
     try {
       setLoading(true);
-      const res = await fetch('/api/v1/chat/transition-sounds/upload', {
+      const res = await fetch(buildUrl('/api/v1/chat/transition-sounds/upload'), {
         method: 'POST',
         body: formData
       });
@@ -637,7 +649,7 @@ function App() {
       const result = await res.json();
       
       // Reload transition sounds
-      const listRes = await fetch('/api/v1/chat/transition-sounds');
+      const listRes = await fetch(buildUrl('/api/v1/chat/transition-sounds'));
       const listData = await listRes.json();
       if (Array.isArray(listData)) {
         setTransitionSounds(listData);
@@ -678,7 +690,7 @@ function App() {
         setPreviewTransitionAudio(null);
       }
 
-      const res = await fetch(`/api/v1/chat/transition-sounds/file/${selectedSound.filename}`, {
+      const res = await fetch(buildUrl(`/api/v1/chat/transition-sounds/file/${selectedSound.filename}`), {
         method: 'DELETE'
       });
 
@@ -688,7 +700,7 @@ function App() {
       }
 
       // Reload list
-      const listRes = await fetch('/api/v1/chat/transition-sounds');
+      const listRes = await fetch(buildUrl('/api/v1/chat/transition-sounds'));
       const listData = await listRes.json();
       if (Array.isArray(listData)) {
         setTransitionSounds(listData);
@@ -718,7 +730,7 @@ function App() {
     // Real-time status polling (every 5 seconds)
     const pollInterval = setInterval(async () => {
       try {
-        const statusRes = await fetch(`/api/v1/chat/generate-status?city_name=${encodeURIComponent(query)}`);
+        const statusRes = await fetch(buildUrl(`/api/v1/chat/generate-status?city_name=${encodeURIComponent(query)}`));
         if (statusRes.ok) {
           const progressData = await statusRes.json();
           setRealProgress(progressData);
@@ -753,7 +765,7 @@ function App() {
         }
       });
 
-      const res = await fetch('/api/v1/chat/generate-video', {
+      const res = await fetch(buildUrl('/api/v1/chat/generate-video'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
