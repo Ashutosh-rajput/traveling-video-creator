@@ -9,9 +9,11 @@ import io
 import os
 import re
 import struct
+import subprocess
 import tempfile
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -690,27 +692,83 @@ def _image_to_clip(image_path: Path, duration: float) -> ImageClip:
     return clip
 
 
+@lru_cache(maxsize=1)
+def _ffmpeg_exe() -> str | None:
+    """Path to the ffmpeg binary bundled with imageio-ffmpeg (or None)."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _ffmpeg_trim_scale(src: Path, out: Path, duration: float, target_w: int, target_h: int) -> bool:
+    """Pre-process a source video with a standalone ffmpeg pass: scale-to-cover +
+    center-crop to target dimensions, trim/loop to exactly `duration`, strip audio.
+
+    This keeps peak memory low: the heavy full-resolution decode happens in a
+    separate streaming process that releases its memory on exit, so MoviePy only
+    ever loads a small, short, already-target-sized clip. Returns True on success.
+    """
+    exe = _ffmpeg_exe()
+    if not exe:
+        return False
+    vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
+    cmd = [
+        exe, "-y",
+        "-stream_loop", "-1",   # loop a too-short source; ignored when long enough
+        "-i", str(src),
+        "-t", f"{duration:.3f}",  # cap output at the segment duration
+        "-vf", vf,
+        "-r", str(FPS),
+        "-an",                   # source audio is unused (voiceover is added later)
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(out),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        return result.returncode == 0 and out.exists() and out.stat().st_size > 0
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Video Gen] ffmpeg pre-trim failed for '{src}': {e}")
+        return False
+
+
 def _video_to_clip(video_path: Path, duration: float) -> VideoFileClip:
-    """Load a video clip, resize with center crop and trim/loop to target duration."""
+    """Return a target-sized, duration-trimmed clip for one source video.
+
+    Preferred path pre-processes with ffmpeg so MoviePy never loads the raw
+    (often 4K) source; falls back to in-MoviePy resize/crop if that pass fails.
+    """
+    target_w = get_width()
+    target_h = get_height()
+
+    # Preferred: ffmpeg pre-trim + pre-scale, then load the small result.
+    trimmed = Path(video_path).with_name(f"{Path(video_path).stem}_trim{int(duration * 1000)}.mp4")
+    if _ffmpeg_trim_scale(Path(video_path), trimmed, duration, target_w, target_h):
+        try:
+            return VideoFileClip(str(trimmed))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[Video Gen] Failed to load pre-trimmed clip, falling back: {e}")
+
+    # Fallback: original in-MoviePy resize/crop/trim path.
     try:
         clip = VideoFileClip(str(video_path))
-        
-        target_w = get_width()
-        target_h = get_height()
         src_w, src_h = clip.w, clip.h
-        
+
         # Scale to cover target dimensions
         scale = max(target_w / src_w, target_h / src_h)
         new_w = int(src_w * scale)
         new_h = int(src_h * scale)
-        
+
         # Ensure dimensions are even (required by some encoders)
         if new_w % 2 != 0: new_w += 1
         if new_h % 2 != 0: new_h += 1
-        
+
         # Resize
         clip = clip.resized((new_w, new_h))
-        
+
         # Center crop using Crop effect
         x_center = new_w // 2
         y_center = new_h // 2
