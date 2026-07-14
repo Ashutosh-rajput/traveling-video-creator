@@ -1,20 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Search, 
-  Image as ImageIcon, 
-  Video as VideoIcon, 
-  MapPin, 
-  Compass, 
-  X, 
+import {
+  Search,
+  MapPin,
+  Compass,
+  X,
   ExternalLink,
-  ChevronRight,
   Loader2,
   AlertCircle,
   Square,
   Volume2,
   Film,
   Download,
-  Play,
   Sparkles,
   Settings,
   Tv,
@@ -25,11 +21,12 @@ import {
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 
-// Use Vite env var `VITE_API_URL` at runtime/build. If empty, fall back to the production default.
-const DEFAULT_API_BASE = 'https://traveling-video-creator-production.up.railway.app';
-const API_BASE = (typeof import.meta !== 'undefined')
-  ? (import.meta.env.VITE_API_URL && import.meta.env.VITE_API_URL.length > 0 ? import.meta.env.VITE_API_URL : DEFAULT_API_BASE)
-  : DEFAULT_API_BASE;
+// API base comes from the Vite env var `VITE_API_URL`. If unset, fall back to
+// same-origin relative paths (empty base) rather than a hardcoded deployment,
+// so a build without VITE_API_URL talks to the host it's served from.
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env.VITE_API_URL)
+  ? import.meta.env.VITE_API_URL
+  : '';
 const buildUrl = (path) => {
   if (!path) return path;
   if (!API_BASE) return path;
@@ -77,13 +74,16 @@ function App() {
 
   // Video generation states
   const [videoGenerating, setVideoGenerating] = useState(false);
-  const [videoProgress, setVideoProgress] = useState(0);
   const [videoUrl, setVideoUrl] = useState(null);
   const [videoError, setVideoError] = useState(null);
-  
+
+  // Busy flag for media library CRUD (music / transition uploads & deletes),
+  // kept separate from the chat `loading` flag so those don't trigger the
+  // "Consulting Gemma..." chat loading UI.
+  const [mediaBusy, setMediaBusy] = useState(false);
+
   // Custom video options & settings panel
   const [debugMode, setDebugMode] = useState(false);
-  const [showSettings, setShowSettings] = useState(true);
   const [selectedLanguage, setSelectedLanguage] = useState('en-IN');
   const [selectedSpeaker, setSelectedSpeaker] = useState('Shubh');
   const [musicMood, setMusicMood] = useState('none');
@@ -106,7 +106,6 @@ function App() {
   
   // Canvas Active Workspace tab: 'video', 'script', 'gallery', 'logs'
   const [canvasTab, setCanvasTab] = useState('video');
-  const [activeGalleryTab, setActiveGalleryTab] = useState('videos');
   const [lightboxItem, setLightboxItem] = useState(null);
   const [selectedMedia, setSelectedMedia] = useState({}); // { attractionLabel: [asset1, asset2] }
   
@@ -195,7 +194,6 @@ function App() {
     setVideoUrl(null);
     setVideoError(null);
     setVideoGenerating(false);
-    setVideoProgress(0);
 
     // Start chat timer
     setChatElapsed(0);
@@ -303,7 +301,7 @@ function App() {
     // Start status polling
     const pollInterval = setInterval(async () => {
       try {
-        const statusRes = await fetch(buildUrl('/api/v1/chat/upload-gdrive-status?filename=travel_guide.mp4'));
+        const statusRes = await fetch(buildUrl('/api/v1/chat/upload-gdrive-status'));
         if (statusRes.ok) {
           const progressData = await statusRes.json();
           setUploadProgress(progressData);
@@ -441,6 +439,68 @@ function App() {
     };
   }, [previewAudio, previewTransitionAudio]);
 
+  // Revoke the previous narration blob URL when it changes or on unmount so
+  // TTS audio blobs don't accumulate in memory across plays.
+  useEffect(() => {
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
+
+  // Revoke the previous rendered-video blob URL when it changes or on unmount.
+  // Guarded so the cached last-video server URL (not a blob) is left alone.
+  useEffect(() => {
+    return () => {
+      if (videoUrl && videoUrl.startsWith('blob:')) URL.revokeObjectURL(videoUrl);
+    };
+  }, [videoUrl]);
+
+  // Invalidate cached narration when the voice or language changes, so the next
+  // Play regenerates audio with the new selection instead of replaying stale audio.
+  useEffect(() => {
+    if (audioElement) audioElement.pause();
+    setIsPlaying(false);
+    setAudioElement(null);
+    setAudioUrl(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpeaker, selectedLanguage]);
+
+  // Poll render status for a city until it completes or errors. Shared by the
+  // Generate button and by reattachment on load (below), so a render that is
+  // still running server-side is tracked either way.
+  const startStatusPolling = (cityName) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(buildUrl(`/api/v1/chat/generate-status?city_name=${encodeURIComponent(cityName)}`));
+        if (!statusRes.ok) return;
+        const progressData = await statusRes.json();
+        setRealProgress(progressData);
+
+        if (progressData.stage === 'completed') {
+          clearInterval(pollInterval);
+          clearInterval(videoTimerRef.current);
+          setVideoGenerating(false);
+          setVideoUrl(buildUrl(`/api/v1/chat/last-video?t=${Date.now()}`));
+        } else if (progressData.stage === 'error') {
+          clearInterval(pollInterval);
+          clearInterval(videoTimerRef.current);
+          setVideoGenerating(false);
+          setVideoError(progressData.message || 'Video generation failed.');
+        } else if (progressData.stage === 'idle') {
+          // No active render on the server (e.g. the backend was restarted
+          // mid-render). Stop tracking instead of spinning forever.
+          clearInterval(pollInterval);
+          clearInterval(videoTimerRef.current);
+          setVideoGenerating(false);
+          setVideoError('Video generation was interrupted. Please try again.');
+        }
+      } catch (err) {
+        console.error("Failed to poll video generation status", err);
+      }
+    }, 3000);
+    return pollInterval;
+  };
+
   // Load background music and transition sound options dynamically on mount and check for cached last video
   useEffect(() => {
     fetch(buildUrl('/api/v1/chat/background-music'))
@@ -461,15 +521,33 @@ function App() {
       })
       .catch(err => console.error("Error loading transition sounds:", err));
 
-    // Check if a last generated video exists in the backend cache
-    fetch(buildUrl('/api/v1/chat/last-video'), { method: 'HEAD' })
-      .then(res => {
-        if (res.ok) {
-          setVideoUrl(buildUrl('/api/v1/chat/last-video'));
+    // Reattach to a render that is still running on the server (e.g. after a
+    // page reload). If none is active, fall back to showing the last cached video.
+    const activeStages = ['starting', 'parsing', 'voiceover', 'downloading', 'rendering', 'finalizing'];
+    fetch(buildUrl('/api/v1/chat/generate-status'))
+      .then(res => (res.ok ? res.json() : null))
+      .then(progress => {
+        if (progress && activeStages.includes(progress.stage) && progress.city_name) {
+          // A render is in progress — resume tracking it.
+          setVideoGenerating(true);
+          setRealProgress(progress);
           setCanvasTab('video');
+          setVideoElapsed(0);
+          videoTimerRef.current = setInterval(() => setVideoElapsed(s => s + 1), 1000);
+          startStatusPolling(progress.city_name);
+          return;
         }
+        // No active render — show the last generated video if one is cached.
+        fetch(buildUrl('/api/v1/chat/last-video'), { method: 'HEAD' })
+          .then(res => {
+            if (res.ok) {
+              setVideoUrl(buildUrl('/api/v1/chat/last-video'));
+              setCanvasTab('video');
+            }
+          })
+          .catch(err => console.error("Error checking cached video:", err));
       })
-      .catch(err => console.error("Error checking cached video:", err));
+      .catch(err => console.error("Error checking render status:", err));
 
     const refreshDriveStatus = () => {
       fetch(buildUrl('/api/v1/chat/gdrive-status'))
@@ -498,15 +576,14 @@ function App() {
       const audio = new Audio(audioUrl);
       audio.volume = musicVolume;
       audio.loop = true;
-      
+      setPreviewAudio(audio); // track immediately so volume changes / cleanup apply
+
       audio.play().then(() => {
-        setPreviewAudio(audio);
         setPreviewingMusic(true);
       }).catch((err) => {
         console.error("Failed to play preview:", err);
+        setPreviewAudio(null);
       });
-      
-      setPreviewAudio(audio);
     }
   };
 
@@ -556,7 +633,7 @@ function App() {
     formData.append('file', file);
 
     try {
-      setLoading(true);
+      setMediaBusy(true);
       const res = await fetch(buildUrl('/api/v1/chat/background-music/upload'), {
         method: 'POST',
         body: formData
@@ -582,7 +659,7 @@ function App() {
       console.error(err);
       alert(err.message);
     } finally {
-      setLoading(false);
+      setMediaBusy(false);
     }
   };
 
@@ -594,8 +671,8 @@ function App() {
     if (!confirm(`Are you sure you want to delete "${selectedTrack.name}"?`)) return;
 
     try {
-      setLoading(true);
-      
+      setMediaBusy(true);
+
       // Pause preview if playing
       if (previewAudio) {
         previewAudio.pause();
@@ -623,7 +700,7 @@ function App() {
       console.error(err);
       alert(err.message);
     } finally {
-      setLoading(false);
+      setMediaBusy(false);
     }
   };
 
@@ -635,7 +712,7 @@ function App() {
     formData.append('file', file);
 
     try {
-      setLoading(true);
+      setMediaBusy(true);
       const res = await fetch(buildUrl('/api/v1/chat/transition-sounds/upload'), {
         method: 'POST',
         body: formData
@@ -661,7 +738,7 @@ function App() {
       console.error(err);
       alert(err.message);
     } finally {
-      setLoading(false);
+      setMediaBusy(false);
     }
   };
 
@@ -681,8 +758,8 @@ function App() {
     if (!confirm(`Are you sure you want to delete "${selectedSound.name}"?`)) return;
 
     try {
-      setLoading(true);
-      
+      setMediaBusy(true);
+
       // Pause preview if playing
       if (previewTransitionAudio) {
         previewTransitionAudio.pause();
@@ -710,61 +787,44 @@ function App() {
       console.error(err);
       alert(err.message);
     } finally {
-      setLoading(false);
+      setMediaBusy(false);
     }
   };
   const handleGenerateVideo = async () => {
+    // Capture the city at generation start so editing the input mid-render
+    // doesn't repoint the status poll or the request at a different city.
+    const cityName = query;
+
     setVideoGenerating(true);
     setVideoError(null);
     setVideoUrl(null);
-    setVideoProgress(0);
     setGdriveLink(null);
     setGdriveError(null);
-    setRealProgress({ percent: 0, stage: 'parsing', message: 'Starting script segments parsing...' });
+    setRealProgress({ percent: 0, stage: 'starting', message: 'Starting video generation...' });
     setCanvasTab('video'); // Switch to video tab to view render progress
 
     // Start video timer
     setVideoElapsed(0);
     videoTimerRef.current = setInterval(() => setVideoElapsed(s => s + 1), 1000);
 
-    // Real-time status polling (every 5 seconds)
-    const pollInterval = setInterval(async () => {
-      try {
-        const statusRes = await fetch(buildUrl(`/api/v1/chat/generate-status?city_name=${encodeURIComponent(query)}`));
-        if (statusRes.ok) {
-          const progressData = await statusRes.json();
-          setRealProgress(progressData);
-        }
-      } catch (err) {
-        console.error("Failed to poll video generation status", err);
+    // Extract selected assets from selectedMedia dictionary
+    const finalSelectedPics = [];
+    const finalSelectedVids = [];
+    Object.values(selectedMedia).forEach(assets => {
+      if (Array.isArray(assets)) {
+        assets.forEach(asset => {
+          if (asset.type === 'video') {
+            finalSelectedVids.push({ url: asset.url, label: asset.label });
+          } else {
+            finalSelectedPics.push({ url: asset.url, label: asset.label });
+          }
+        });
       }
-    }, 5000);
+    });
 
     try {
-      // Extract selected assets from selectedMedia dictionary
-      const finalSelectedPics = [];
-      const finalSelectedVids = [];
-
-      Object.values(selectedMedia).forEach(assets => {
-        if (Array.isArray(assets)) {
-          assets.forEach(asset => {
-            if (asset.type === 'video') {
-              // Video asset
-              finalSelectedVids.push({
-                url: asset.url,
-                label: asset.label
-              });
-            } else {
-              // Photo asset
-              finalSelectedPics.push({
-                url: asset.url,
-                label: asset.label
-              });
-            }
-          });
-        }
-      });
-
+      // Kick off the background render. This returns immediately — the server
+      // keeps rendering even if this tab is closed; we just poll for progress.
       const res = await fetch(buildUrl('/api/v1/chat/generate-video'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -772,7 +832,7 @@ function App() {
           script: videoScript,
           pics: finalSelectedPics,
           videos: finalSelectedVids,
-          city_name: query,
+          city_name: cityName,
           aspect_ratio: aspectRatio,
           speaker: selectedSpeaker,
           language_code: selectedLanguage,
@@ -784,25 +844,20 @@ function App() {
         }),
       });
 
-      clearInterval(pollInterval);
-
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Video generation failed.');
+        throw new Error(errData.detail || 'Failed to start video generation.');
       }
 
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      setVideoUrl(url);
-      setRealProgress({ percent: 100, stage: 'completed', message: 'Video compiled successfully!' });
+      // Poll status until the render completes or fails. The server keeps
+      // rendering even if this tab is closed; on reload we reattach on mount.
+      startStatusPolling(cityName);
     } catch (err) {
-      clearInterval(pollInterval);
+      clearInterval(videoTimerRef.current);
       console.error(err);
+      setVideoGenerating(false);
       setVideoError(err.message || 'Video generation failed.');
       setRealProgress({ percent: 0, stage: 'error', message: err.message || 'Generation failed.' });
-    } finally {
-      setVideoGenerating(false);
-      clearInterval(videoTimerRef.current);
     }
   };
 
@@ -1107,9 +1162,9 @@ function App() {
                         <input 
                           type="file" 
                           accept=".mp3,.wav" 
-                          onChange={handleMusicUpload} 
+                          onChange={handleMusicUpload}
                           style={{ display: 'none' }}
-                          disabled={loading}
+                          disabled={mediaBusy}
                         />
                       </label>
 
@@ -1117,7 +1172,7 @@ function App() {
                         <button
                           type="button"
                           onClick={handleMusicDelete}
-                          disabled={loading}
+                          disabled={mediaBusy}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -1307,9 +1362,9 @@ function App() {
                         <input 
                           type="file" 
                           accept=".mp3,.wav" 
-                          onChange={handleTransitionSoundUpload} 
+                          onChange={handleTransitionSoundUpload}
                           style={{ display: 'none' }}
-                          disabled={loading}
+                          disabled={mediaBusy}
                         />
                       </label>
 
@@ -1317,7 +1372,7 @@ function App() {
                         <button
                           type="button"
                           onClick={handleTransitionSoundDelete}
-                          disabled={loading}
+                          disabled={mediaBusy}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -1451,7 +1506,7 @@ function App() {
         <div className="canvas-panel animate-fade-in" style={{ animationDelay: '0.2s' }}>
           
           {/* Workspace Tabbing Headers */}
-          {(message || videoScript || pics.length > 0 || videos.length > 0 || loading || videoUrl) && (
+          {(message || videoScript || pics.length > 0 || videos.length > 0 || loading || videoUrl || videoGenerating) && (
             <div className="canvas-tabs-header">
               <button 
                 className={`canvas-tab-btn ${canvasTab === 'video' ? 'active' : ''}`}
@@ -1490,7 +1545,7 @@ function App() {
           <div className="glass-card canvas-card">
             
             {/* 1. Empty Project Canvas State */}
-            {!loading && !message && !videoScript && pics.length === 0 && !videoUrl && (
+            {!loading && !videoGenerating && !message && !videoScript && pics.length === 0 && !videoUrl && (
               <div className="canvas-empty-state">
                 <div className="canvas-empty-glow">
                   <Tv size={48} />
@@ -1571,7 +1626,7 @@ function App() {
             )}
 
             {/* 4. Active Tab: Video Compilation */}
-            {!loading && canvasTab === 'video' && (message || videoScript || videoUrl) && (
+            {!loading && canvasTab === 'video' && (message || videoScript || videoUrl || videoGenerating) && (
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                 
                 {/* Generate Video Action Panel if not compiled yet */}
@@ -1613,10 +1668,10 @@ function App() {
                         </div>
                         {/* Progress Bar Container */}
                         <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '999px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.05)' }}>
-                          <div style={{ 
-                            width: `${realProgress.percent}%`, 
-                            height: '100%', 
-                            background: 'linear-gradient(90deg, var(--primary-color), var(--primary-light))', 
+                          <div style={{
+                            width: `${realProgress.percent}%`,
+                            height: '100%',
+                            background: 'linear-gradient(90deg, var(--primary-color), var(--accent-purple))',
                             borderRadius: '999px',
                             transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)'
                           }} />

@@ -42,21 +42,6 @@ def _asset_matches_place(asset: dict[str, Any], place_name: str) -> bool:
     searchable_text = f"{title} {page_url} {creator}"
     
     place_lower = place_name.lower().strip()
-    
-    # 1. Custom guard for "Bee Falls"
-    if "bee" in place_lower and "falls" in place_lower:
-        words = set(re.findall(r"[a-z0-9]+", searchable_text))
-        has_insect = any(w in words for w in ["bee", "bees", "beehive", "beehives", "honey", "apiary", "insect", "insects", "pasture", "wasp", "wasps", "hornet", "hornets"])
-        has_falls = any(w in words for w in ["falls", "waterfall", "waterfalls", "cascade", "cascades", "pachmarhi"])
-        if has_insect and not has_falls:
-            return False
-
-    # 2. Custom guard for "Jata Shankar Caves" / Caves
-    if "caves" in place_lower or "cave" in place_lower or "shankar" in place_lower:
-        words = set(re.findall(r"[a-z0-9]+", searchable_text))
-        has_cave_theme = any(w in words for w in ["cave", "caves", "temple", "shankar", "shiva", "shiv", "rock", "stone", "deity", "pachmarhi", "jata"])
-        if not has_cave_theme:
-            return False
 
     place_terms = {
         term
@@ -153,7 +138,6 @@ def _pexels_videos(place_name: str, limit: int) -> list[dict[str, Any]]:
     return videos
 
 
-@tool
 def search_pexels_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
     """Search Pexels for travel photos and videos for a destination or place name."""
     if not settings.pexels_api_key:
@@ -172,7 +156,6 @@ def search_pexels_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> di
         return _api_error("pexels", place_name, f"Pexels API error: {e}")
 
 
-@tool
 def search_pixabay_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
     """Search Pixabay for travel photos and videos for a destination or place name."""
     if not settings.pixabay_api_key:
@@ -248,7 +231,6 @@ def search_pixabay_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> d
         return _api_error("pixabay", place_name, f"Pixabay API error: {e}")
 
 
-@tool
 def search_unsplash_place_photos(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
     """Search Unsplash for high-quality travel photos for a destination or place name."""
     if not settings.unsplash_access_key:
@@ -479,50 +461,25 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
             photos_pool.append(pic)
             seen_pic_urls.add(purl)
 
-    final_videos = []
     final_photos = []
-    used_photo_urls = set()
 
-    # 1. Selection Pipeline - Video Clips (we want exactly 2)
-    # First, take actual videos
-    for vid in actual_videos_pool[:2]:
-        final_videos.append(vid)
+    # 1. Video clips — real videos ONLY, in provider-priority order
+    #    (Pexels → Pixabay → Wikimedia). We deliberately do NOT pad this list
+    #    with still images formatted as fake clips: a photo shown as a "video"
+    #    is misleading. Attractions with no real video simply fall back to
+    #    photos (which the render pipeline animates as Ken-Burns stills).
+    final_videos = actual_videos_pool[:2]
 
-    # If not enough actual videos, fill using photos formatted as video clips
-    if len(final_videos) < 2:
-        for pic in photos_pool:
-            purl = pic.get("image_url")
-            if purl not in used_photo_urls:
-                fake_vid = {
-                    "id": pic.get("id"),
-                    "title": pic.get("title"),
-                    "page_url": pic.get("page_url"),
-                    "video_url": purl,
-                    "thumbnail_url": pic.get("thumbnail_url"),
-                    "duration_seconds": 4.0,  # default duration for images
-                    "creator": pic.get("creator"),
-                    "creator_url": pic.get("creator_url"),
-                    "provider": pic.get("provider")
-                }
-                final_videos.append(fake_vid)
-                used_photo_urls.add(purl)
-                if len(final_videos) >= 2:
-                    break
-
-    # 2. Selection Pipeline - Photos (we want exactly 3)
+    # 2. Photos — take the top of the priority-ordered pool.
     for pic in photos_pool:
-        purl = pic.get("image_url")
-        if purl not in used_photo_urls:
-            final_photos.append(pic)
-            used_photo_urls.add(purl)
-            if len(final_photos) >= 3:
-                break
+        final_photos.append(pic)
+        if len(final_photos) >= 3:
+            break
 
-    rule_desc = f"Extracted {len(final_videos)} video clips (including {len(used_photo_urls)} photo fallbacks) and {len(final_photos)} photos"
     logger.info(
         f"[Media Search] '{place_name}' search finished. "
         f"Actual videos in pool: {len(actual_videos_pool)}, photos in pool: {len(photos_pool)}. "
-        f"Rule applied: {rule_desc}"
+        f"Extracted {len(final_videos)} real video clips and {len(final_photos)} photos."
     )
 
     return {

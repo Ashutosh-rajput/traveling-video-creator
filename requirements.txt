@@ -38,7 +38,7 @@ langgraph-prebuilt==1.1.0
 langgraph-sdk==0.4.2
 langsmith==0.10.1
 moviepy==2.2.1
-numpy==2.5.1
+numpy==2.4.5
 oauthlib==3.3.1
 orjson==3.11.9
 ormsgpack==1.12.2

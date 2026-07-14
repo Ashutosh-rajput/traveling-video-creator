@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
+import asyncio
+import logging
 import os
+import re
 import urllib.parse
 
 from dotenv import set_key
@@ -9,8 +12,9 @@ from dotenv import set_key
 from app.core.config import settings
 from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset
 from app.services.agent import AgentService, get_agent_service
+from app.services.progress import get_progress, set_progress
 from app.services.tts import generate_tts
-from app.services.video import generate_travel_video, ensure_transition_sounds
+from app.services.video import generate_travel_video, set_generation_progress
 
 router = APIRouter(tags=["chat"])
 
@@ -207,7 +211,6 @@ async def delete_background_music_file_endpoint(filename: str):
 @router.get("/chat/transition-sounds")
 async def list_transition_sounds_endpoint():
     """List all available transition sound effects from the data folder."""
-    ensure_transition_sounds()
     sound_dir = "data/transition_sounds"
     if not os.path.exists(sound_dir):
         return []
@@ -357,73 +360,88 @@ async def text_to_speech_endpoint(payload: TTSRequest):
         ) from exc
 
 
+# Strong references to in-flight background render tasks so the event loop
+# doesn't garbage-collect them mid-run.
+_render_tasks: set = set()
+
+
 @router.post("/chat/generate-video")
 async def generate_video_endpoint(payload: VideoRequest):
-    """Generate a travel guide video from script, photos, and video clips."""
+    """Kick off video generation in the background and return immediately.
+
+    Rendering (TTS + downloads + MoviePy) can take minutes, so it runs detached
+    from this request instead of holding the connection open — which avoids
+    reverse-proxy timeouts and lets the client close the tab and come back.
+    Poll ``/chat/generate-status`` for progress; fetch the finished file from
+    ``/chat/last-video`` once the stage reports ``completed``.
+    """
+    # Only one render at a time — a second concurrent MoviePy render would
+    # double peak memory and OOM small hosts (e.g. a 1 GB Railway instance).
+    if _render_tasks:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A video is already being generated. Please wait for it to finish before starting another.",
+        )
+
     output_dir = "data/output_videos"
-    
-    # Clean the output directory when starting a new generation
+
+    # Clear any previous render so /last-video can't serve a stale video while
+    # the new one is still rendering.
     if os.path.exists(output_dir):
         try:
             for f in os.listdir(output_dir):
                 if f.endswith(".mp4"):
                     os.remove(os.path.join(output_dir, f))
         except Exception as e:
-            import logging
             logging.getLogger(__name__).warning(f"Failed to clear output videos directory: {e}")
 
-    try:
-        import asyncio
+    city_name = payload.city_name or ""
+    # Reset progress synchronously so an early poll can't observe a previous
+    # run's terminal ('completed'/'error') state.
+    set_generation_progress(city_name, "starting", 0, "Starting video generation...")
 
-        video_bytes = await asyncio.to_thread(
-            generate_travel_video,
-            payload.script,
-            payload.pics,
-            payload.videos,
-            payload.city_name,
-            payload.aspect_ratio,
-            payload.speaker,
-            payload.language_code,
-            payload.music_mood,
-            payload.music_volume,
-            payload.transition_style,
-            payload.transition_sound,
-            payload.caption_theme,
-        )
-
-        # Cache the generated video inside data/output_videos preserving filename
-        import re
-        safe_city = re.sub(r"[^\w\-]", "_", payload.city_name).strip() if payload.city_name else "travel_guide"
-        if not safe_city:
-            safe_city = "travel_guide"
-        filename = f"{safe_city}_vlog.mp4"
-        
-        cached_path = os.path.join(output_dir, filename)
+    async def _run_render():
         try:
-            os.makedirs(output_dir, exist_ok=True)
-            with open(cached_path, "wb") as f:
-                f.write(video_bytes)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to cache generated video: {e}")
+            output_path = await asyncio.to_thread(
+                generate_travel_video,
+                payload.script,
+                payload.pics,
+                payload.videos,
+                payload.city_name,
+                payload.aspect_ratio,
+                payload.speaker,
+                payload.language_code,
+                payload.music_mood,
+                payload.music_volume,
+                payload.transition_style,
+                payload.transition_sound,
+                payload.caption_theme,
+            )
 
-        return Response(
-            content=video_bytes,
-            media_type="video/mp4",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            },
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Video generation failed: {str(exc)}",
-        ) from exc
+            # Move to a stable, city-named filename for nicer downloads / Drive upload.
+            safe_city = re.sub(r"[^\w\-]", "_", payload.city_name).strip() if payload.city_name else "travel_guide"
+            if not safe_city:
+                safe_city = "travel_guide"
+            cached_path = os.path.join(output_dir, f"{safe_city}_vlog.mp4")
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                if os.path.abspath(output_path) != os.path.abspath(cached_path):
+                    os.replace(output_path, cached_path)
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Failed to cache generated video: {e}")
+
+            set_generation_progress(city_name, "completed", 100, "Video compiled successfully!")
+        except ValueError as exc:
+            set_generation_progress(city_name, "error", 0, str(exc))
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Background video generation failed")
+            set_generation_progress(city_name, "error", 0, f"Video generation failed: {exc}")
+
+    task = asyncio.create_task(_run_render())
+    _render_tasks.add(task)
+    task.add_done_callback(_render_tasks.discard)
+
+    return {"status": "started", "city_name": city_name}
 
 
 @router.get("/chat/last-video")
@@ -562,75 +580,58 @@ async def search_reddit_endpoint(
         ) from exc
 
 
-# Global dict to track Google Drive upload progress (filename -> status dict)
-gdrive_upload_progress: dict[str, dict] = {}
+# Only one Drive upload ("the latest render") is ever active, so progress is
+# tracked under a single fixed key rather than a per-filename one. This avoids
+# the client needing to know the server-side filename to poll status.
+_UPLOAD_PROGRESS_KEY = "latest"
 
-def set_upload_progress(filename: str, percent: int, stage: str = "uploading", message: str = ""):
-    key = filename.lower().strip()
-    gdrive_upload_progress[key] = {
-        "percent": percent,
-        "stage": stage,
-        "message": message
-    }
+def set_upload_progress(percent: int, stage: str = "uploading", message: str = ""):
+    set_progress("gdrive_upload", _UPLOAD_PROGRESS_KEY, {"percent": percent, "stage": stage, "message": message})
 
-def get_upload_progress(filename: str) -> dict:
-    key = filename.lower().strip()
-    return gdrive_upload_progress.get(key, {"percent": 0, "stage": "idle", "message": "No active upload."})
+def get_upload_progress() -> dict:
+    return get_progress(
+        "gdrive_upload", _UPLOAD_PROGRESS_KEY, {"percent": 0, "stage": "idle", "message": "No active upload."}
+    )
 
 
-class UploadProgressIterable:
-    def __init__(self, metadata_bytes, media_header_bytes, file_path, closing_bytes, callback):
-        import os
-        self.metadata_bytes = metadata_bytes
-        self.media_header_bytes = media_header_bytes
-        self.file_path = file_path
-        self.closing_bytes = closing_bytes
-        self.file_size = os.path.getsize(file_path)
-        self.callback = callback
-        
-        self.total_size = len(metadata_bytes) + len(media_header_bytes) + self.file_size + len(closing_bytes)
-        self.bytes_sent = 0
+async def _gdrive_multipart_stream(metadata_bytes, media_header_bytes, file_path, closing_bytes, on_progress):
+    total = len(metadata_bytes) + len(media_header_bytes) + os.path.getsize(file_path) + len(closing_bytes)
+    sent = 0
 
-    async def __aiter__(self):
-        """Stream an async request body compatible with httpx.AsyncClient."""
-        # 1. Send metadata
-        yield self.metadata_bytes
-        self.bytes_sent += len(self.metadata_bytes)
-        self.callback(int((self.bytes_sent / self.total_size) * 100))
+    yield metadata_bytes
+    sent += len(metadata_bytes)
+    yield media_header_bytes
+    sent += len(media_header_bytes)
 
-        # 2. Send media header
-        yield self.media_header_bytes
-        self.bytes_sent += len(self.media_header_bytes)
-        self.callback(int((self.bytes_sent / self.total_size) * 100))
+    chunk_size = 512 * 1024
+    with open(file_path, "rb") as f:
+        while chunk := f.read(chunk_size):
+            yield chunk
+            sent += len(chunk)
+            on_progress(int(sent / total * 100))
 
-        # 3. Stream file chunks
-        chunk_size = 512 * 1024  # 512KB chunks
-        with open(self.file_path, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-                self.bytes_sent += len(chunk)
-                self.callback(int((self.bytes_sent / self.total_size) * 100))
-
-        # 4. Send closing boundary
-        yield self.closing_bytes
-        self.bytes_sent += len(self.closing_bytes)
-        self.callback(100)
+    yield closing_bytes
+    on_progress(100)
 
 
 @router.get("/chat/generate-status")
-async def get_generate_status_endpoint(city_name: str):
-    """Retrieve real-time video generation progress for a given city."""
-    from app.services.video import get_generation_progress
-    return get_generation_progress(city_name)
+async def get_generate_status_endpoint(city_name: str | None = None):
+    """Retrieve real-time video generation progress.
+
+    With ``city_name`` → that city's progress. Without it → the most recent
+    render's progress (used by the client on load to reattach to a render that
+    is still running server-side).
+    """
+    from app.services.video import get_generation_progress, get_latest_generation_progress
+    if city_name:
+        return get_generation_progress(city_name)
+    return get_latest_generation_progress()
 
 
 @router.get("/chat/upload-gdrive-status")
-async def get_upload_status_endpoint(filename: str):
-    """Retrieve real-time Google Drive upload progress for a given filename."""
-    return get_upload_progress(filename)
+async def get_upload_status_endpoint():
+    """Retrieve real-time progress of the active Google Drive upload."""
+    return get_upload_progress()
 
 
 @router.post("/chat/upload-gdrive")
@@ -741,36 +742,29 @@ async def upload_video_to_gdrive_endpoint():
         metadata_bytes = metadata_part.encode("utf-8")
         media_header_bytes = media_part_header.encode("utf-8")
         closing_bytes = closing.encode("utf-8")
-        
-        # Start progress at 0%
-        set_upload_progress(filename, 0, "uploading", f"Starting upload of '{filename}'...")
-        
-        def progress_callback(percent):
-            set_upload_progress(filename, percent, "uploading", f"Uploading '{filename}' ({percent}%)...")
-            
-        payload_iterable = UploadProgressIterable(
-            metadata_bytes=metadata_bytes,
-            media_header_bytes=media_header_bytes,
-            file_path=file_path,
-            closing_bytes=closing_bytes,
-            callback=progress_callback
+
+        content_length = (
+            len(metadata_bytes) + len(media_header_bytes)
+            + os.path.getsize(file_path) + len(closing_bytes)
         )
-        
-        headers["Content-Length"] = str(payload_iterable.total_size)
-        
+        headers["Content-Length"] = str(content_length)
+
+        set_upload_progress(0, "uploading", f"Starting upload of '{filename}'...")
+
+        def on_progress(percent):
+            set_upload_progress(percent, "uploading", f"Uploading '{filename}' ({percent}%)...")
+
         async with httpx.AsyncClient(timeout=None) as client:
             res = await client.post(
                 url,
                 headers=headers,
-                content=payload_iterable
+                content=_gdrive_multipart_stream(metadata_bytes, media_header_bytes, file_path, closing_bytes, on_progress),
             )
             res.raise_for_status()
             data = res.json()
             file_id = data.get("id")
-            
-            # Completion status
-            set_upload_progress(filename, 100, "completed", "Upload completed successfully!")
-            
+
+            set_upload_progress(100, "completed", "Upload completed successfully!")
             return {
                 "message": "Video successfully uploaded to Google Drive!",
                 "file_id": file_id,

@@ -1,5 +1,6 @@
 from functools import lru_cache
 import json
+import logging
 from typing import Any
 
 from langchain.agents import create_agent
@@ -7,43 +8,8 @@ from langchain_core.messages import ToolMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.core.config import Settings, settings
-from app.schemas.chat import AgentOutput, ChatRequest, ChatResponse, MediaAsset, ToolCallData
+from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset, ToolCallData
 from app.services.media_tools import get_media_tools
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a professional travel video producer, scriptwriter, and guide. "
-    "When a user asks about a city, area, or destination, you MUST identify exactly 5 top attractions "
-    "or interesting places to visit in that city/area.\n"
-    "CRITICAL SEARCH PROCESS:\n"
-    "1. First, call the search_all_place_media tool with the general city name (e.g. 'Mangalore' or 'Paris') "
-    "   to gather general city photos and videos. Label these assets with the city name (e.g. 'Mangalore'). These will be used for the video intro.\n"
-    "2. Then, call search_all_place_media ONCE for each of the 5 specific attractions. Label those with the attraction name.\n"
-    "Do NOT call individual provider tools separately. Just use search_all_place_media.\n"
-    "Your response must focus primarily on producing a detailed, full-length, professional video voiceover script. "
-    "Populate the structured output schema with the following fields:\n"
-    "- message: A brief 1-2 paragraph description/summary introduction of the city/area. Do NOT list/describe the attractions here.\n"
-    "- video_script: A detailed, highly engaging video voiceover script (about 250 words) describing a travel itinerary "
-    "or vlog walkthrough of the city.\n"
-    "  CRITICAL SCRIPT RULES:\n"
-    "  1. Start the script with a brief, highly engaging general introduction paragraph (about 30-40 words) that is NOT prefixed by any tag. "
-    "     This serves as the 'Intro' segment of the video.\n"
-    "  2. Immediately after the intro paragraph, insert the first attraction marker tag on its own line in the format: [attraction: Exact Attraction Name] "
-    "     followed by its narration text. Do this for all 5 attractions.\n"
-    "     Example format:\n"
-    "     Welcome to beautiful Bangalore, the vibrant Garden City of India! Let's explore the best spots together!\n"
-    "     [attraction: Lalbagh Botanical Garden]\n"
-    "     We start our morning at the stunning Lalbagh Botanical Garden! The fresh morning air...\n"
-    "     [attraction: Bangalore Palace]\n"
-    "     Now, let us step into royalty at the magnificent Bangalore Palace...\n"
-    "  3. Do NOT include any other director instructions, camera angles, sound effects, or scene transitions "
-    "  in brackets or parentheses (e.g., do NOT output '[Opening Shot: ...]', '[Cut to: ...]', '(Morning)'). "
-    "  The ONLY brackets allowed are the [attraction: ...] markers. Only output the actual spoken dialogue narration.\n"
-    "  4. To achieve a highly expressive human tone and help the Text-to-Speech (TTS) engine speak with natural emotions and inflections, "
-    "  write using conversational phrases, warm tones, and expressive punctuation (like exclamation marks '!', pauses '...', and emphasis words).\n"
-    "- pics: A list of collected photo objects, where each object contains 'url' (from the src/large or image_url fields of tool results) and 'label' (name of the attraction or the city name).\n"
-    "- videos: A list of collected video objects, where each object contains 'url' (from the video_url or link fields of tool results) and 'label' (name of the attraction or the city name).\n"
-    "Note: Do NOT output or write any image or video URLs in your text response outside the structured fields, as the system will extract them automatically."
-)
 
 
 def repair_json_string(s: str) -> str:
@@ -117,18 +83,20 @@ class AgentService:
     def __init__(self, app_settings: Settings) -> None:
         self.settings = app_settings
         self._agent: Any | None = None
+        self._llm: ChatGoogleGenerativeAI | None = None
 
     def _build_llm(self) -> ChatGoogleGenerativeAI:
-        if not self.settings.google_api_key:
-            raise ValueError("GOOGLE_API_KEY is missing. Add it to .env before calling /chat.")
-
-        return ChatGoogleGenerativeAI(
-            model=self.settings.gemma_model,
-            google_api_key=self.settings.google_api_key,
-            temperature=self.settings.llm_temperature,
-            max_output_tokens=self.settings.llm_max_output_tokens,
-            timeout=self.settings.request_timeout_seconds,
-        )
+        if self._llm is None:
+            if not self.settings.google_api_key:
+                raise ValueError("GOOGLE_API_KEY is missing. Add it to .env before calling /chat.")
+            self._llm = ChatGoogleGenerativeAI(
+                model=self.settings.gemma_model,
+                google_api_key=self.settings.google_api_key,
+                temperature=self.settings.llm_temperature,
+                max_output_tokens=self.settings.llm_max_output_tokens,
+                timeout=self.settings.request_timeout_seconds,
+            )
+        return self._llm
 
     def _build_agent(self, system_prompt: str) -> Any:
         return create_agent(
@@ -217,7 +185,6 @@ class AgentService:
         return prompt
 
     async def invoke(self, payload: ChatRequest) -> ChatResponse:
-        import logging
         logger = logging.getLogger(__name__)
         logger.info(f"[Agent] Received user query: '{payload.message}'")
         logger.info(f"[Agent] Options — Lang: {payload.language}, Places: {payload.num_places}, Length: {payload.video_length}")
@@ -236,9 +203,6 @@ class AgentService:
         agent = self._build_agent(system_prompt)
 
         result = await agent.ainvoke({"messages": [{"role": "user", "content": payload.message}]})
-
-        import logging
-        logger = logging.getLogger(__name__)
 
         try:
             messages = result.get("messages", []) if isinstance(result, dict) else []

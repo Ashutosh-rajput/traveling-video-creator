@@ -27,23 +27,34 @@ from moviepy import (
 from moviepy.video.fx import CrossFadeIn
 from PIL import Image, ImageDraw, ImageFont
 
+from app.core.config import settings
+from app.services.progress import get_progress, set_progress
 from app.services.tts import generate_tts
 from proglog import ProgressBarLogger
 
-# Global video generation progress tracker mapping (city_name -> status dict)
-generation_progress: dict[str, dict] = {}
+
+# Fixed key mirroring the most recent render's progress, so the client can
+# discover an in-progress render (e.g. after a page reload) without already
+# knowing which city it was for. Single-user tool → one active render at a time.
+_LATEST_GENERATION_KEY = "__latest__"
+
 
 def set_generation_progress(city_name: str, stage: str, percent: int, message: str):
-    key = city_name.lower().strip()
-    generation_progress[key] = {
-        "stage": stage,
-        "percent": percent,
-        "message": message
-    }
+    record = {"stage": stage, "percent": percent, "message": message, "city_name": city_name}
+    set_progress("generation", city_name, record)
+    set_progress("generation", _LATEST_GENERATION_KEY, record)
 
 def get_generation_progress(city_name: str) -> dict:
-    key = city_name.lower().strip()
-    return generation_progress.get(key, {"stage": "idle", "percent": 0, "message": "No active project."})
+    return get_progress(
+        "generation", city_name,
+        {"stage": "idle", "percent": 0, "message": "No active project.", "city_name": city_name},
+    )
+
+def get_latest_generation_progress() -> dict:
+    return get_progress(
+        "generation", _LATEST_GENERATION_KEY,
+        {"stage": "idle", "percent": 0, "message": "No active project.", "city_name": ""},
+    )
 
 
 class MoviePyProgressLogger(ProgressBarLogger):
@@ -145,6 +156,24 @@ CAPTION_THEMES = {
     }
 }
 
+# Linux (Docker) font fallbacks. _load_font tries each path in order and skips
+# any that don't exist, so listing both Windows and Linux paths makes rendering
+# work on both platforms. Fonts installed via the Dockerfile (fonts-dejavu-core,
+# fonts-noto-core).
+_LINUX_FONTS_BOLD = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 0),
+]
+_LINUX_FONTS_REGULAR = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", 0),
+]
+# Broad Indic-script coverage for non-ASCII text (Hindi, Marathi, etc.).
+_LINUX_FONTS_INDIC = [
+    ("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf", 0),
+]
+
 _FONT_PATHS_BOLD = [
     ("C:/Windows/Fonts/seguibl.ttf", 0),  # Segoe UI Black (Super premium bold look)
     ("C:/Windows/Fonts/segoeuib.ttf", 0), # Segoe UI Bold
@@ -153,12 +182,12 @@ _FONT_PATHS_BOLD = [
     ("C:/Windows/Fonts/ariblk.ttf", 0),   # Arial Black
     ("C:/Windows/Fonts/arialbd.ttf", 0),  # Arial Bold
     ("C:/Windows/Fonts/arial.ttf", 0),
-]
+] + _LINUX_FONTS_BOLD
 _FONT_PATHS_REGULAR = [
     ("C:/Windows/Fonts/segoeui.ttf", 0),
     ("C:/Windows/Fonts/Nirmala.ttc", 0),  # Nirmala UI Regular
     ("C:/Windows/Fonts/arial.ttf", 0),
-]
+] + _LINUX_FONTS_REGULAR
 
 _FONT_FAMILY_MAPPING = {
     "Segoe UI": {
@@ -191,7 +220,11 @@ _FONT_FAMILY_MAPPING = {
 def _get_font_paths(text: str, font_family: str = "Segoe UI", bold: bool = True) -> list[tuple[str, int]]:
     """Get the appropriate font path chain depending on requested family and text characters."""
     if any(ord(c) > 127 for c in text):
-        return [("C:/Windows/Fonts/Nirmala.ttc", 1 if bold else 0)] + (_FONT_PATHS_BOLD if bold else _FONT_PATHS_REGULAR)
+        return (
+            [("C:/Windows/Fonts/Nirmala.ttc", 1 if bold else 0)]
+            + _LINUX_FONTS_INDIC
+            + (_FONT_PATHS_BOLD if bold else _FONT_PATHS_REGULAR)
+        )
     
     family_entry = _FONT_FAMILY_MAPPING.get(font_family, _FONT_FAMILY_MAPPING["Segoe UI"])
     primary_paths = family_entry["bold"] if bold else family_entry["regular"]
@@ -286,7 +319,12 @@ def _load_font(paths: list[tuple[str, int]], size: int) -> ImageFont.FreeTypeFon
             return ImageFont.truetype(p, size, index=idx)
         except Exception:
             continue
-    return ImageFont.load_default()
+    # Last-resort fallback. Newer Pillow lets load_default scale to a size so
+    # captions aren't rendered at the tiny bitmap default when no font resolves.
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:
+        return ImageFont.load_default()
 
 # ---------------------------------------------------------------------------
 # import contextvars
@@ -321,6 +359,10 @@ class ScriptSegment:
         self.narration_text = narration_text
         self.audio_bytes: bytes | None = None
         self.audio_duration: float = 0.0
+        # Offset of this segment within the combined voiceover track. Populated
+        # by _combine_wavs(); initialized here so reads are safe even if that
+        # step is skipped or fails before reaching this segment.
+        self._start_time: float = 0.0
 
     def __repr__(self) -> str:
         return f"ScriptSegment({self.attraction_name!r}, words={len(self.narration_text.split())})"
@@ -384,6 +426,9 @@ def _wav_duration(raw_wav: bytes) -> float:
         return data_size / (24000 * 2)
 
 
+TTS_MAX_WORKERS = 6
+
+
 def generate_segment_audios(
     segments: list[ScriptSegment],
     speaker: str | None = None,
@@ -391,24 +436,45 @@ def generate_segment_audios(
     city_name: str | None = None,
 ) -> bytes:
     """Generate TTS for each segment, store audio_bytes & duration,
-    and return the combined WAV audio (with silence gaps)."""
+    and return the combined WAV audio (with silence gaps).
+
+    Sarvam TTS is a blocking network call, so segments are synthesized
+    concurrently in a thread pool to overlap the per-call latency. Results
+    are assigned back to each segment object, so original order is preserved
+    regardless of completion order.
+    """
 
     total = len(segments)
-    for i, seg in enumerate(segments):
-        if city_name:
-            percent = 10 + int((i / total) * 15)  # 10% to 25%
-            set_generation_progress(
-                city_name,
-                "voiceover",
-                percent,
-                f"Generating voiceover audio for '{seg.attraction_name}' ({i+1}/{total})..."
-            )
-        seg.audio_bytes = generate_tts(
-            seg.narration_text,
-            speaker=speaker,
-            language_code=language_code,
-        )
-        seg.audio_duration = _wav_duration(seg.audio_bytes)
+    if not total:
+        return _combine_wavs(segments)
+
+    completed = 0
+    max_workers = min(total, TTS_MAX_WORKERS)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_seg = {
+            pool.submit(
+                generate_tts,
+                seg.narration_text,
+                speaker=speaker,
+                language_code=language_code,
+            ): seg
+            for seg in segments
+        }
+        # as_completed is processed on this thread, so the shared `completed`
+        # counter and progress writes need no extra locking.
+        for future in as_completed(future_to_seg):
+            seg = future_to_seg[future]
+            seg.audio_bytes = future.result()
+            seg.audio_duration = _wav_duration(seg.audio_bytes)
+            completed += 1
+            if city_name:
+                percent = 10 + int((completed / total) * 15)  # 10% to 25%
+                set_generation_progress(
+                    city_name,
+                    "voiceover",
+                    percent,
+                    f"Generating voiceover audio ({completed}/{total})...",
+                )
 
     # Combine all WAV segments into one continuous WAV with silence gaps
     return _combine_wavs(segments)
@@ -848,106 +914,6 @@ def _create_subtitle_clips(text: str, audio_duration: float) -> list:
     return subtitle_clips
 
 
-def ensure_transition_sounds():
-    """Ensure that the data/transition_sounds directory and default sounds exist."""
-    import os
-    import numpy as np
-    import wave
-    from pathlib import Path
-    import logging
-    
-    sound_dir = Path("data/transition_sounds")
-    sound_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Generate whoosh.wav
-    whoosh_path = sound_dir / "whoosh.wav"
-    if not whoosh_path.exists():
-        try:
-            duration = 1.5
-            sample_rate = 44100
-            t = np.linspace(0, duration, int(sample_rate * duration))
-            
-            # White noise
-            noise = np.random.normal(0, 0.15, len(t))
-            # Resonant sweep frequency from 150Hz to 1200Hz to 150Hz
-            freq = 150 + 1050 * np.sin(np.pi * t / duration)
-            phase = 2 * np.pi * np.cumsum(freq) / sample_rate
-            sweep = np.sin(phase) * 0.15
-            
-            # Gaussian envelope
-            envelope = np.exp(-((t - duration/2) / (duration/4.5))**2)
-            audio = (noise + sweep) * envelope
-            audio = np.clip(audio, -1.0, 1.0)
-            audio_ints = (audio * 32767).astype(np.int16)
-            
-            with wave.open(str(whoosh_path), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_ints.tobytes())
-        except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to generate whoosh.wav: {e}")
-
-    # Generate click.wav (Camera snap)
-    click_path = sound_dir / "click.wav"
-    if not click_path.exists():
-        try:
-            duration = 0.25
-            sample_rate = 44100
-            t = np.linspace(0, duration, int(sample_rate * duration))
-            
-            noise = np.random.normal(0, 0.25, len(t)) * np.exp(-t * 50)
-            click = np.sin(2 * np.pi * 1800 * t) * 0.3 * np.exp(-t * 120)
-            release = np.random.normal(0, 0.15, len(t)) * np.exp(-np.maximum(0, t - 0.08) * 60)
-            
-            audio = noise + click + release
-            audio = np.clip(audio, -1.0, 1.0)
-            audio_ints = (audio * 32767).astype(np.int16)
-            
-            with wave.open(str(click_path), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_ints.tobytes())
-        except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to generate click.wav: {e}")
-
-    # Generate glitch.wav (Sci-fi buzz)
-    glitch_path = sound_dir / "glitch.wav"
-    if not glitch_path.exists():
-        try:
-            duration = 0.8
-            sample_rate = 44100
-            t = np.linspace(0, duration, int(sample_rate * duration))
-            
-            audio = np.zeros_like(t)
-            num_steps = 12
-            step_len = len(t) // num_steps
-            for i in range(num_steps):
-                start = i * step_len
-                end = min((i + 1) * step_len, len(t))
-                f = np.random.choice([100, 300, 800, 2000, 4000])
-                mode = np.random.choice(["sq", "ns", "sn"])
-                vol = np.random.choice([0.0, 0.1, 0.2, 0.35])
-                sub_t = t[start:end]
-                if mode == "sq":
-                    audio[start:end] = np.sign(np.sin(2 * np.pi * f * sub_t)) * vol
-                elif mode == "ns":
-                    audio[start:end] = np.random.normal(0, vol * 0.7, end - start)
-                else:
-                    audio[start:end] = np.sin(2 * np.pi * f * sub_t) * vol
-            
-            audio = np.clip(audio, -1.0, 1.0)
-            audio_ints = (audio * 32767).astype(np.int16)
-            
-            with wave.open(str(glitch_path), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_ints.tobytes())
-        except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to generate glitch.wav: {e}")
-
 
 def _render_attraction_title_image(name: str) -> str:
     from PIL import Image, ImageDraw
@@ -1012,8 +978,6 @@ def compile_video(
     import os
     import numpy as np
     from moviepy.video.fx import FadeIn, FadeOut
-    
-    ensure_transition_sounds()
     
     segment_clips = []
     num_attractions = sum(1 for s in segments if s.attraction_name != "Intro")
@@ -1204,7 +1168,7 @@ def compile_video(
         fps=FPS,
         codec="libx264",
         audio_codec="aac",
-        threads=8,
+        threads=settings.render_threads,
         preset="ultrafast",
         logger=moviepy_logger,
         ffmpeg_params=["-pix_fmt", "yuv420p"]
@@ -1282,21 +1246,25 @@ def generate_travel_video(
     transition_style: str = "none",
     transition_sound: str = "none",
     caption_theme: str = "Neon Yellow (Default)",
-) -> bytes:
-    """End-to-end travel guide video generation."""
+) -> str:
+    """End-to-end travel guide video generation. Returns the output file path."""
     import logging
     logger = logging.getLogger(__name__)
 
-    # Set dynamic resolution and theme in context variables (thread-safe)
+    # Set dynamic resolution and theme in context variables (thread-safe).
+    # Resolution is scaled down to video_max_long_edge to bound memory use on
+    # small hosts (dimensions kept even for yuv420p).
     t_token = _caption_theme_var.set(caption_theme)
-    if aspect_ratio.lower() == "portrait":
-        logger.info("[Video Gen] Configuring portrait resolution (1080x1920)")
-        w_token = _video_width_var.set(1080)
-        h_token = _video_height_var.set(1920)
-    else:
-        logger.info("[Video Gen] Configuring horizontal resolution (1920x1080)")
-        w_token = _video_width_var.set(1920)
-        h_token = _video_height_var.set(1080)
+    base_w, base_h = (1080, 1920) if aspect_ratio.lower() == "portrait" else (1920, 1080)
+    cap = settings.video_max_long_edge
+    long_edge = max(base_w, base_h)
+    if cap and cap < long_edge:
+        scale = cap / long_edge
+        base_w = max(2, (int(base_w * scale) // 2) * 2)
+        base_h = max(2, (int(base_h * scale) // 2) * 2)
+    logger.info(f"[Video Gen] Configuring resolution {base_w}x{base_h} (aspect={aspect_ratio}, cap={cap})")
+    w_token = _video_width_var.set(base_w)
+    h_token = _video_height_var.set(base_h)
 
     # Auto-detect city name from general media labels if not provided
     if not city_name:
@@ -1356,12 +1324,13 @@ def generate_travel_video(
             transition_sound=transition_sound
         )
 
-        # Step 5: Return video bytes
+        # Step 5: Return the output path (caller streams it from disk). The
+        # caller marks "completed" only after moving the file into place.
         if city_name:
-            set_generation_progress(city_name, "completed", 100, "Video compiled successfully!")
+            set_generation_progress(city_name, "finalizing", 98, "Finalizing video output...")
         size_mb = Path(output_path).stat().st_size / (1024 * 1024)
-        logger.info(f"[Video Gen] Step 5/5 — Done! Output: '{output_path}' ({size_mb:.1f} MB). Returning video bytes.")
-        return Path(output_path).read_bytes()
+        logger.info(f"[Video Gen] Step 5/5 — Done! Output: '{output_path}' ({size_mb:.1f} MB).")
+        return output_path
 
     finally:
         # Reset context variables

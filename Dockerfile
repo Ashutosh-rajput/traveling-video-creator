@@ -5,6 +5,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Fonts for caption/title rendering (Latin via DejaVu/Noto, Indic via Noto).
+# Without these, Pillow falls back to a tiny bitmap font and captions look broken.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN addgroup --system app && adduser --system --ingroup app app
 
 COPY requirements.txt .

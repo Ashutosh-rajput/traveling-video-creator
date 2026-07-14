@@ -6,11 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import chat, health
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.services.progress import clear_all
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    # A restart kills any in-flight render/upload, so previously persisted
+    # progress is stale — clear it to avoid zombie "in progress" state.
+    clear_all()
     app.state.ready = True
     yield
     app.state.ready = False

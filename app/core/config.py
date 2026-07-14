@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     sarvam_speaker: str = "shubh"
     sarvam_model: str = "bulbul:v3"
 
+    # Video render tuning. Lower these on memory-constrained hosts (e.g. a 1 GB
+    # Railway instance) to avoid out-of-memory crashes during MoviePy rendering.
+    # video_max_long_edge caps the longer output dimension: 1920 = full 1080p,
+    # 1280 = 720p (~half the frame memory), 960 = 540p. render_threads controls
+    # how many frames ffmpeg buffers concurrently.
+    video_max_long_edge: int = 1920
+    render_threads: int = 4
+
     # Personal Google Drive OAuth configuration. Create an OAuth "Desktop/Web"
     # client in Google Cloud and register this callback URL there.
     gdrive_client_id: str = Field(default="", repr=False)
