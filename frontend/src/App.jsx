@@ -1722,6 +1722,25 @@ function App() {
                         <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Resolution: {aspectRatio === 'portrait' ? '1080x1920 (Portrait)' : '1920x1080 (Wide)'}</p>
                       </div>
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        {videoScript && (
+                          <button
+                            type="button"
+                            onClick={handleGenerateVideo}
+                            className="console-btn"
+                            style={{
+                              padding: '8px 16px',
+                              fontSize: '0.85rem',
+                              background: 'rgba(59, 130, 246, 0.15)',
+                              border: '1px solid rgba(59, 130, 246, 0.35)',
+                              color: '#60a5fa',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            <Film size={14} />
+                            <span>Recompile Travel Video</span>
+                          </button>
+                        )}
+
                         <a
                           href={videoUrl}
                           download={`${query.replace(/\s+/g, '_')}_vlog.mp4`}
