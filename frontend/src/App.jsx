@@ -245,7 +245,8 @@ function App() {
         } else if (videoAssets.length === 1) {
           selected = [videoAssets[0], ...photoAssets.slice(0, 1)];
         } else {
-          selected = photoAssets.slice(0, 2);
+          // No video for this attraction — allow up to 3 photos.
+          selected = photoAssets.slice(0, 3);
         }
         initialSelected[label] = selected;
       });
@@ -262,7 +263,12 @@ function App() {
     }
   };
 
+  // Max selectable assets per attraction: 2 normally, but 3 photos when the
+  // attraction has no video option available.
+  const getMaxSelect = (label) => (videos.some(v => v.label === label) ? 2 : 3);
+
   const handleToggleMedia = (label, asset) => {
+    const maxSelect = getMaxSelect(label);
     setSelectedMedia(prev => {
       const current = prev[label] || [];
       const assetUrl = asset.url || asset.video_url || asset.image_url;
@@ -271,19 +277,17 @@ function App() {
 
       const normalizedAsset = { ...asset, url: assetUrl, type: assetType };
       const exists = current.some(item => item.url === assetUrl && item.type === assetType);
-      
+
       let next = [];
       if (exists) {
         // Remove it
         next = current.filter(item => !(item.url === assetUrl && item.type === assetType));
+      } else if (current.length >= maxSelect) {
+        // FIFO: drop the oldest, keep the rest, add the new one.
+        next = [...current.slice(current.length - maxSelect + 1), normalizedAsset];
       } else {
         // Add it
-        if (current.length >= 2) {
-          // FIFO: remove oldest, add new
-          next = [current[1], normalizedAsset];
-        } else {
-          next = [...current, normalizedAsset];
-        }
+        next = [...current, normalizedAsset];
       }
       return {
         ...prev,
@@ -2135,7 +2139,7 @@ function App() {
                 <div style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '14px' }}>
                   <h3 style={{ fontSize: '1.2rem', fontWeight: '700', color: '#e2e8f0' }}>Choose Segment Media</h3>
                   <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    Select exactly <strong>2 items</strong> (videos/photos) for each attraction. If not chosen, default selection will be compiled.
+                    Select <strong>2 items</strong> (videos/photos) per attraction — or <strong>3 photos</strong> when no video is available. If not chosen, a default selection will be compiled.
                   </p>
                 </div>
 
@@ -2147,7 +2151,10 @@ function App() {
                     const placeVideos = videos.filter(v => v.label === label);
                     const placePhotos = pics.filter(p => p.label === label);
                     const selected = selectedMedia[label] || [];
-                    const isReady = selected.length === 2;
+                    // 3 photos allowed when no video exists for this attraction, else 2.
+                    const maxSelect = placeVideos.length > 0 ? 2 : 3;
+                    const isReady = selected.length === maxSelect;
+                    const remaining = maxSelect - selected.length;
 
                     return (
                       <div 
@@ -2178,7 +2185,7 @@ function App() {
                                 padding: '4px 10px',
                                 borderRadius: '20px'
                               }}>
-                                Ready (2/2 Selected)
+                                Ready ({selected.length}/{maxSelect} Selected)
                               </span>
                             ) : (
                               <span style={{ 
@@ -2190,7 +2197,7 @@ function App() {
                                 padding: '4px 10px',
                                 borderRadius: '20px'
                               }}>
-                                {selected.length === 1 ? 'Select 1 more (or fallback will be used)' : 'Select 2 items (or fallback will be used)'}
+                                {`Select ${remaining} more item${remaining > 1 ? 's' : ''} of ${maxSelect} (or fallback will be used)`}
                               </span>
                             )}
                           </div>
@@ -2204,7 +2211,7 @@ function App() {
                             gap: '14px' 
                           }}
                         >
-                          {/* Video candidates (Up to 5) */}
+                          {/* Video candidates (up to 4) */}
                           {placeVideos.map((vid, i) => {
                             const isSelected = selected.some(item => item.type === 'video' && item.url === vid.url);
                             return (

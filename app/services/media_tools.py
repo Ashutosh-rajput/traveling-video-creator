@@ -468,12 +468,12 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
     #    with still images formatted as fake clips: a photo shown as a "video"
     #    is misleading. Attractions with no real video simply fall back to
     #    photos (which the render pipeline animates as Ken-Burns stills).
-    final_videos = actual_videos_pool[:2]
+    final_videos = actual_videos_pool[:4]
 
     # 2. Photos — take the top of the priority-ordered pool.
     for pic in photos_pool:
         final_photos.append(pic)
-        if len(final_photos) >= 3:
+        if len(final_photos) >= 4:
             break
 
     logger.info(
