@@ -31,8 +31,18 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    message: str
     pics: list[MediaAsset] = Field(default_factory=list)
     videos: list[MediaAsset] = Field(default_factory=list)
     tool_data: list[ToolCallData] = Field(default_factory=list)
+    video_script: str = ""
+
+
+class EditScriptRequest(BaseModel):
+    current_script: str = Field(..., min_length=1, max_length=20_000, description="The existing voiceover script to revise.")
+    instruction: str = Field(..., min_length=1, max_length=2_000, description="Natural-language edit instruction, e.g. 'make it shorter' or 'add more about the food'.")
+    language: str = Field(default="en-IN", description="Language code for the output (e.g. en-IN, hi-IN).")
+    script_style: str = Field(default="reel", description="Narration style: 'reel' or 'classic'.")
+
+
+class EditScriptResponse(BaseModel):
     video_script: str = ""

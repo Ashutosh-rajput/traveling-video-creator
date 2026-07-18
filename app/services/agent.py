@@ -8,7 +8,13 @@ from langchain_core.messages import ToolMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.core.config import Settings, settings
-from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset, ToolCallData
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    EditScriptRequest,
+    MediaAsset,
+    ToolCallData,
+)
 from app.services.media_tools import get_media_tools
 
 
@@ -179,9 +185,8 @@ class AgentService:
             "   to gather general city photos and videos. Label these assets with the city name (e.g. 'Mangalore'). These will be used for the video intro.\n"
             f"2. Then, call search_all_place_media ONCE for each of the {num_places} specific attractions. Label those with the attraction name.\n"
             "Do NOT call individual provider tools separately. Just use search_all_place_media.\n"
-            "Your response must focus primarily on producing a detailed, full-length, professional video voiceover script. "
+            "Your response must focus solely on producing a detailed, full-length, professional video voiceover script. "
             "Populate the structured output schema with the following fields:\n"
-            "- message: A brief 1-2 paragraph description/summary introduction of the city/area. Do NOT list/describe the attractions here.\n"
             f"- video_script: A detailed, highly engaging video voiceover script ({length_desc}) describing a travel itinerary "
             "or vlog walkthrough of the city.\n"
             f"{style_instructions}"
@@ -310,17 +315,13 @@ class AgentService:
                                 tool_output=msg.content
                             ))
 
-            # Extract message and video_script
-            answer = ""
+            # Extract the video script. The separate destination-summary
+            # ("message") field has been removed — the script is the only
+            # narrative output the agent produces.
             video_script = ""
             structured = result.get("structured_response") if isinstance(result, dict) else None
 
             if structured:
-                if hasattr(structured, "message"):
-                    answer = structured.message
-                elif isinstance(structured, dict) and "message" in structured:
-                    answer = structured["message"]
-
                 if hasattr(structured, "video_script"):
                     video_script = structured.video_script
                 elif isinstance(structured, dict) and "video_script" in structured:
@@ -336,102 +337,62 @@ class AgentService:
                 elif isinstance(structured, dict) and "videos" in structured:
                     merge_media(videos, structured["videos"])
 
-            # Fallback to tag/JSON parsing if structured response is missing
-            if not answer:
+            # Fallback to tag/JSON parsing if a structured response is missing.
+            if not video_script:
+                raw_text = ""
                 for msg in reversed(messages):
                     if isinstance(msg, AIMessage) or getattr(msg, "type", None) == "ai":
-                        content = msg.content
-                        if isinstance(content, list):
-                            text_blocks = []
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    text_blocks.append(block.get("text", ""))
-                                elif isinstance(block, str):
-                                    text_blocks.append(block)
-                            answer = "\n".join(text_blocks)
-                        else:
-                            answer = str(content)
+                        raw_text = self._flatten_content(msg.content)
                         break
+                if not raw_text and messages:
+                    raw_text = self._flatten_content(
+                        getattr(messages[-1], "content", str(messages[-1]))
+                    )
 
-                if not answer and messages:
-                    last_message = messages[-1]
-                    raw = getattr(last_message, "content", str(last_message))
-                    if isinstance(raw, list):
-                        text_parts = []
-                        for block in raw:
-                            if isinstance(block, dict):
-                                if block.get("type") == "text":
-                                    text_parts.append(block.get("text", ""))
-                                elif block.get("type") == "thinking":
-                                    continue
-                                else:
-                                    text_parts.append(str(block))
-                            elif isinstance(block, str):
-                                text_parts.append(block)
-                            else:
-                                text_parts.append(str(block))
-                        answer = "\n".join(text_parts)
-                    else:
-                        answer = str(raw)
-
-                # 1. Try parsing answer as raw JSON or markdown-wrapped JSON
-                clean_answer = answer.strip()
-                if clean_answer.startswith("```"):
-                    lines = clean_answer.split("\n")
+                # 1. Try parsing as raw or markdown-fenced JSON
+                clean = raw_text.strip()
+                if clean.startswith("```"):
+                    lines = clean.split("\n")
                     if lines[0].strip().startswith("```"):
                         lines = lines[1:]
                     if lines and lines[-1].strip().startswith("```"):
                         lines = lines[:-1]
-                    clean_answer = "\n".join(lines).strip()
+                    clean = "\n".join(lines).strip()
 
                 parsed_json = None
                 try:
-                    parsed_json = json.loads(clean_answer)
+                    parsed_json = json.loads(clean)
                 except Exception:
                     try:
-                        repaired = repair_json_string(clean_answer)
-                        parsed_json = json.loads(repaired)
+                        parsed_json = json.loads(repair_json_string(clean))
                     except Exception:
                         pass
 
-                if isinstance(parsed_json, dict) and ("message" in parsed_json or "video_script" in parsed_json):
-                    answer = parsed_json.get("message", "")
+                if isinstance(parsed_json, dict) and "video_script" in parsed_json:
                     video_script = parsed_json.get("video_script", "")
                     if "pics" in parsed_json:
                         merge_media(pics, parsed_json["pics"])
                     if "videos" in parsed_json:
                         merge_media(videos, parsed_json["videos"])
                 else:
-                    # 2. Try parsing out <video_script> tags
-                    lower_answer = answer.lower()
-                    tag_start = lower_answer.find("<video_script>")
+                    # 2. Try extracting a <video_script> tag block
+                    lower = raw_text.lower()
+                    tag_start = lower.find("<video_script>")
                     if tag_start != -1:
-                        try:
-                            msg_body = answer[:tag_start].strip()
-                            rest = answer[tag_start + len("<video_script>"):]
-                            tag_end = rest.lower().find("</video_script>")
-                            if tag_end != -1:
-                                video_script = rest[:tag_end].strip()
-                                after_tag = rest[tag_end + len("</video_script>"):]
-                                if after_tag.strip():
-                                    msg_body += "\n" + after_tag.strip()
-                            else:
-                                video_script = rest.strip()
-                            answer = msg_body.strip()
-                        except Exception:
-                            pass
-
-            if not answer.strip():
-                answer = "I apologize, but I encountered an issue while generating the city description. Please try submitting your request again."
+                        rest = raw_text[tag_start + len("<video_script>"):]
+                        tag_end = rest.lower().find("</video_script>")
+                        video_script = rest[:tag_end].strip() if tag_end != -1 else rest.strip()
+                    else:
+                        # 3. No JSON, no tags — treat the whole text as the script.
+                        video_script = raw_text.strip()
 
             logger.info(
                 f"[Agent] Finished query processing. "
-                f"Generated description (~{len(answer.split())} words) and video script (~{len(video_script.split())} words). "
+                f"Generated video script (~{len(video_script.split())} words). "
                 f"Collected {len(pics)} photos and {len(videos)} videos in total."
             )
 
             return ChatResponse(
-                message=answer,
                 pics=pics,
                 videos=videos,
                 tool_data=tool_data,
@@ -440,6 +401,94 @@ class AgentService:
         except Exception as e:
             logger.error(f"Error processing agent response: {type(e).__name__}: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _flatten_content(content: Any) -> str:
+        """Collapse an LLM message's content (str or list of blocks) into text."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif block.get("type") == "thinking":
+                        continue
+                    else:
+                        parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n".join(p for p in parts if p)
+        return str(content)
+
+    async def edit_script(self, payload: EditScriptRequest) -> str:
+        """Revise an existing voiceover script per a natural-language instruction,
+        preserving the [attraction: ...] markers and formatting rules. No media
+        tools are involved — this is a pure LLM rewrite of the provided script."""
+        logger = logging.getLogger(__name__)
+        logger.info(f"[Agent] Editing script with instruction: '{payload.instruction[:120]}'")
+
+        llm = self._build_llm()
+
+        style_note = (
+            "Keep the punchy, first-person social-reel tone (hook, day-wise itinerary, "
+            "practical budget/travel notes, closing call to action)."
+            if payload.script_style != "classic"
+            else "Keep the warm, professional travel-guide tone."
+        )
+
+        lang_note = ""
+        if payload.language and payload.language != "en-IN":
+            lang_note = (
+                f"\nWrite the narration in the same language as the original script "
+                f"(target locale: {payload.language}). Do NOT translate the attraction "
+                f"names inside the [attraction: ...] markers — keep those in English."
+            )
+
+        system_prompt = (
+            "You are a professional travel video script editor. You will be given an existing "
+            "voiceover narration script and an edit instruction. Apply the instruction and return "
+            "the FULL revised script.\n"
+            "STRICT RULES you must preserve:\n"
+            "1. Keep every attraction as its own block, each introduced by a marker line in the exact "
+            "format [attraction: Exact Attraction Name] followed by its spoken narration. Do not rename, "
+            "add, or remove attractions unless the instruction explicitly asks you to.\n"
+            "2. Start with a short, untagged intro paragraph (no marker), just like the original.\n"
+            "3. The ONLY brackets allowed are the [attraction: ...] markers. Do NOT add camera directions, "
+            "scene notes, or sound cues in brackets or parentheses. Output ONLY spoken narration.\n"
+            f"4. {style_note}"
+            f"{lang_note}\n"
+            "Return ONLY the revised script text — no preamble, no explanation, no markdown code fences."
+        )
+
+        user_prompt = (
+            f"CURRENT SCRIPT:\n{payload.current_script}\n\n"
+            f"EDIT INSTRUCTION:\n{payload.instruction}\n\n"
+            "Now output the full revised script."
+        )
+
+        result = await llm.ainvoke(
+            [("system", system_prompt), ("human", user_prompt)]
+        )
+        revised = self._flatten_content(getattr(result, "content", result)).strip()
+
+        # Strip an accidental markdown code fence if the model wrapped the output.
+        if revised.startswith("```"):
+            lines = revised.split("\n")
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            revised = "\n".join(lines).strip()
+
+        if not revised:
+            # Fall back to the original so the caller never loses the user's script.
+            logger.warning("[Agent] Script edit produced empty output; returning original.")
+            return payload.current_script
+
+        logger.info(f"[Agent] Script edited (~{len(revised.split())} words).")
+        return revised
 
 
 @lru_cache

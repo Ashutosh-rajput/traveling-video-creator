@@ -10,7 +10,7 @@ import urllib.parse
 from dotenv import set_key
 
 from app.core.config import settings
-from app.schemas.chat import ChatRequest, ChatResponse, MediaAsset
+from app.schemas.chat import ChatRequest, ChatResponse, EditScriptRequest, EditScriptResponse, MediaAsset
 from app.services.agent import AgentService, get_agent_service
 from app.services.progress import get_progress, set_progress
 from app.services.tts import generate_tts
@@ -327,6 +327,27 @@ async def chat_with_agent(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The language model request failed.",
+        ) from exc
+
+
+@router.post("/chat/edit-script", response_model=EditScriptResponse)
+async def edit_script_endpoint(
+    payload: EditScriptRequest,
+    agent_service: AgentService = Depends(get_agent_service),
+) -> EditScriptResponse:
+    """Revise an existing voiceover script per a natural-language instruction."""
+    try:
+        revised = await agent_service.edit_script(payload)
+        return EditScriptResponse(video_script=revised)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The script edit request failed.",
         ) from exc
 
 

@@ -19,7 +19,6 @@ import {
   Cloud
 } from 'lucide-react';
 import './App.css';
-import ReactMarkdown from 'react-markdown';
 
 // API base comes from the Vite env var `VITE_API_URL`. If unset, fall back to
 // same-origin relative paths (empty base) rather than a hardcoded deployment,
@@ -62,11 +61,12 @@ function App() {
   const [error, setError] = useState(null);
   
   // Response states
-  const [message, setMessage] = useState('');
   const [pics, setPics] = useState([]);
   const [videos, setVideos] = useState([]);
   const [toolData, setToolData] = useState([]);
   const [videoScript, setVideoScript] = useState('');
+  const [editInstruction, setEditInstruction] = useState('');
+  const [editingScript, setEditingScript] = useState(false);
   const [ttsLoading, setTtsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioUrl, setAudioUrl] = useState(null);
@@ -187,7 +187,6 @@ function App() {
 
     setLoading(true);
     setError(null);
-    setMessage('');
     setPics([]);
     setVideos([]);
     setToolData([]);
@@ -222,7 +221,6 @@ function App() {
       }
 
       const data = await response.json();
-      setMessage(data.message || '');
       setPics(data.pics || []);
       setVideos(data.videos || []);
       setToolData(data.tool_data || []);
@@ -404,6 +402,47 @@ function App() {
       alert(err.message || 'Failed to generate voiceover. Make sure SARVAM_API_KEY is configured in .env.');
     } finally {
       setTtsLoading(false);
+    }
+  };
+
+  // Ask the agent to revise the current script per a natural-language instruction.
+  const handleAgentEditScript = async () => {
+    const instruction = editInstruction.trim();
+    if (!instruction || !videoScript.trim() || editingScript) return;
+
+    setEditingScript(true);
+    try {
+      const res = await fetch(buildUrl('/api/v1/chat/edit-script'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_script: videoScript,
+          instruction,
+          language: selectedLanguage,
+          script_style: scriptStyle,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to edit the script.');
+      }
+
+      const data = await res.json();
+      if (data.video_script) {
+        setVideoScript(data.video_script);
+        setEditInstruction('');
+        // Any previously synthesized voiceover no longer matches the new script.
+        if (audioElement) audioElement.pause();
+        setAudioElement(null);
+        setAudioUrl(null);
+        setIsPlaying(false);
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Failed to edit the script.');
+    } finally {
+      setEditingScript(false);
     }
   };
 
@@ -1544,7 +1583,7 @@ function App() {
         <div className="canvas-panel animate-fade-in" style={{ animationDelay: '0.2s' }}>
           
           {/* Workspace Tabbing Headers */}
-          {(message || videoScript || pics.length > 0 || videos.length > 0 || loading || videoUrl || videoGenerating) && (
+          {(videoScript || pics.length > 0 || videos.length > 0 || loading || videoUrl || videoGenerating) && (
             <div className="canvas-tabs-header">
               <button 
                 className={`canvas-tab-btn ${canvasTab === 'video' ? 'active' : ''}`}
@@ -1583,7 +1622,7 @@ function App() {
           <div className="glass-card canvas-card">
             
             {/* 1. Empty Project Canvas State */}
-            {!loading && !videoGenerating && !message && !videoScript && pics.length === 0 && !videoUrl && (
+            {!loading && !videoGenerating && !videoScript && pics.length === 0 && !videoUrl && (
               <div className="canvas-empty-state">
                 <div className="canvas-empty-glow">
                   <Tv size={48} />
@@ -1664,7 +1703,7 @@ function App() {
             )}
 
             {/* 4. Active Tab: Video Compilation */}
-            {!loading && canvasTab === 'video' && (message || videoScript || videoUrl || videoGenerating) && (
+            {!loading && canvasTab === 'video' && (videoScript || videoUrl || videoGenerating) && (
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                 
                 {/* Generate Video Action Panel if not compiled yet */}
@@ -1961,7 +2000,7 @@ function App() {
             )}
 
             {/* 5. Active Tab: Script & Narration */}
-            {!loading && canvasTab === 'script' && (message || videoScript) && (
+            {!loading && canvasTab === 'script' && videoScript && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-glass)', paddingBottom: '14px' }}>
                   <div>
@@ -2006,15 +2045,86 @@ function App() {
                 </div>
 
                 <div className="glass-card" style={{ padding: '20px', background: 'rgba(15, 23, 42, 0.3)', border: '1px solid var(--border-glass)' }}>
-                  <h4 style={{ fontSize: '0.8rem', fontWeight: '700', color: '#fbbf24', textTransform: 'uppercase', marginBottom: '10px' }}>Destination Summary</h4>
-                  <div className="agent-message">
-                    <ReactMarkdown>{message}</ReactMarkdown>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                    <h4 style={{ fontSize: '0.8rem', fontWeight: '700', color: '#818cf8', textTransform: 'uppercase' }}>Voiceover Script Narration</h4>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Editable · keep the [attraction: ...] markers</span>
                   </div>
-                </div>
+                  <textarea
+                    className="canvas-script-box"
+                    value={videoScript}
+                    onChange={(e) => setVideoScript(e.target.value)}
+                    disabled={editingScript}
+                    spellCheck={false}
+                    style={{
+                      width: '100%',
+                      minHeight: '260px',
+                      resize: 'vertical',
+                      font: 'inherit',
+                      lineHeight: '1.7',
+                      color: '#e2e8f0',
+                      background: 'rgba(2, 6, 23, 0.4)',
+                      border: '1px solid var(--border-glass)',
+                      borderRadius: '10px',
+                      padding: '14px',
+                      boxSizing: 'border-box',
+                      opacity: editingScript ? 0.6 : 1,
+                    }}
+                  />
 
-                <div className="glass-card" style={{ padding: '20px', background: 'rgba(15, 23, 42, 0.3)', border: '1px solid var(--border-glass)' }}>
-                  <h4 style={{ fontSize: '0.8rem', fontWeight: '700', color: '#818cf8', textTransform: 'uppercase', marginBottom: '10px' }}>Voiceover Script Narration</h4>
-                  <div className="canvas-script-box">{videoScript}</div>
+                  {/* Ask the AI agent to revise the script */}
+                  <div style={{ marginTop: '14px', display: 'flex', gap: '8px', alignItems: 'stretch' }}>
+                    <input
+                      type="text"
+                      value={editInstruction}
+                      onChange={(e) => setEditInstruction(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleAgentEditScript(); }}
+                      disabled={editingScript || !videoScript.trim()}
+                      placeholder="Tell the AI how to edit, e.g. 'make it shorter' or 'add more about the food'"
+                      style={{
+                        flex: 1,
+                        font: 'inherit',
+                        fontSize: '0.85rem',
+                        color: '#e2e8f0',
+                        background: 'rgba(2, 6, 23, 0.4)',
+                        border: '1px solid var(--border-glass)',
+                        borderRadius: '8px',
+                        padding: '10px 12px',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAgentEditScript}
+                      disabled={editingScript || !editInstruction.trim() || !videoScript.trim()}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        fontSize: '0.85rem',
+                        padding: '8px 16px',
+                        borderRadius: '8px',
+                        border: '1px solid rgba(56, 189, 248, 0.3)',
+                        background: 'rgba(56, 189, 248, 0.12)',
+                        color: '#38bdf8',
+                        cursor: (editingScript || !editInstruction.trim() || !videoScript.trim()) ? 'not-allowed' : 'pointer',
+                        fontWeight: '600',
+                        whiteSpace: 'nowrap',
+                        opacity: (editingScript || !editInstruction.trim() || !videoScript.trim()) ? 0.5 : 1,
+                      }}
+                    >
+                      {editingScript ? (
+                        <>
+                          <Loader2 size={14} className="stage-spinner" />
+                          <span>Revising...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles size={14} />
+                          <span>Ask AI to Edit</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
