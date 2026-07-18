@@ -105,13 +105,36 @@ class AgentService:
             system_prompt=system_prompt,
         )
 
-    def _compile_prompt(self, language: str, num_places: int, video_length: str) -> str:
+    def _compile_prompt(self, language: str, num_places: int, video_length: str, script_style: str = "reel") -> str:
         # Determine word length prompt
         length_desc = "about 250 words"  # medium
         if video_length == "short":
             length_desc = "about 120 words"
         elif video_length == "long":
             length_desc = "about 400 words"
+
+        # Narration style block, injected into the script rules below.
+        if script_style == "classic":
+            style_instructions = (
+                "  SCRIPT STYLE — CLASSIC GUIDE:\n"
+                "  Write a warm, professional travel-guide voiceover: an engaging general introduction, then "
+                "  vivid, descriptive narration for each attraction in turn.\n"
+            )
+        else:  # "reel"
+            style_instructions = (
+                "  SCRIPT STYLE — SOCIAL TRAVEL REEL (write like a punchy, first-person travel reel for a young audience):\n"
+                "  a) Open the intro paragraph with a direct, aspirational HOOK spoken to the viewer ('you'), framing the "
+                "     destination as an underrated, hidden-gem escape.\n"
+                "  b) Weave PRACTICAL trip info naturally into the narration (conversationally, not as a list): an approximate "
+                "     total trip budget, how to reach the place (e.g. train/bus/bike/rental), and rough hotel and food cost ranges. "
+                "     Use the currency that fits the destination.\n"
+                f"  c) Present the {num_places} attractions as a DAY-WISE itinerary (Day 1, Day 2, ...), using flow phrases like "
+                "     'start your morning at...', 'in the evening head to...', 'on day two...'. Each attraction STILL gets its own "
+                "     [attraction: Exact Name] marker line before its narration.\n"
+                "  d) End the final attraction's narration with a short, social CALL TO ACTION (e.g. save this video and share it "
+                "     with the travel buddy you'd take here).\n"
+                "  Keep the tone casual, energetic, and direct.\n"
+            )
 
         # Determine language instruction
         lang_instruction = ""
@@ -161,6 +184,7 @@ class AgentService:
             "- message: A brief 1-2 paragraph description/summary introduction of the city/area. Do NOT list/describe the attractions here.\n"
             f"- video_script: A detailed, highly engaging video voiceover script ({length_desc}) describing a travel itinerary "
             "or vlog walkthrough of the city.\n"
+            f"{style_instructions}"
             "  CRITICAL SCRIPT RULES:\n"
             "  1. Start the script with a brief, highly engaging general introduction paragraph (about 30-40 words) that is NOT prefixed by any tag. "
             "     This serves as the 'Intro' segment of the video.\n"
@@ -198,7 +222,8 @@ class AgentService:
         system_prompt = self._compile_prompt(
             language=payload.language,
             num_places=payload.num_places,
-            video_length=payload.video_length
+            video_length=payload.video_length,
+            script_style=payload.script_style,
         )
         agent = self._build_agent(system_prompt)
 

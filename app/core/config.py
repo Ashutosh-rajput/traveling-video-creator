@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # how many frames ffmpeg buffers concurrently.
     video_max_long_edge: int = 1920
     render_threads: int = 4
+    # Render engine: "ffmpeg" (fast — native ffmpeg assembly + ASS captions) or
+    # "moviepy" (legacy fallback). ffmpeg is much faster and lower-memory.
+    render_engine: str = "ffmpeg"
 
     # Personal Google Drive OAuth configuration. Create an OAuth "Desktop/Web"
     # client in Google Cloud and register this callback URL there.

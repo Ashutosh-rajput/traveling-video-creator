@@ -528,15 +528,26 @@ def _combine_wavs(segments: list[ScriptSegment]) -> bytes:
 # 3. Media Downloading
 # ---------------------------------------------------------------------------
 
+# A descriptive User-Agent is required by some media hosts — notably Wikimedia
+# (upload.wikimedia.org returns 403 without one) — and avoids hotlink blocks on
+# other CDNs. Without this, selected Wikimedia photos/videos fail to download and
+# the segment renders as a black frame.
+_DOWNLOAD_HEADERS = {
+    "User-Agent": "VoyageurTravelVideoCreator/1.0 (https://voyageur.ai; contact@voyageur.ai)"
+}
+
+
 def _download_file(url: str, dest: Path) -> bool:
     """Download a file from URL to local path. Returns True on success."""
     try:
-        with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+        with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, headers=_DOWNLOAD_HEADERS) as client:
             resp = client.get(url)
             resp.raise_for_status()
             dest.write_bytes(resp.content)
         return True
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Video Gen] Media download failed for {url}: {e}")
         return False
 
 
@@ -713,7 +724,7 @@ def _ffmpeg_trim_scale(src: Path, out: Path, duration: float, target_w: int, tar
     exe = _ffmpeg_exe()
     if not exe:
         return False
-    vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
+    vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1"
     cmd = [
         exe, "-y",
         "-stream_loop", "-1",   # loop a too-short source; ignored when long enough
@@ -801,15 +812,14 @@ def _create_black_frame() -> str:
     return tmp.name
 
 
-def _create_title_overlay_clip(city_name: str, num_attractions: int, duration: float) -> ImageClip:
-    """Create a styled title text overlay for the intro segment.
+def _build_intro_title_image(city_name: str, num_attractions: int):
+    """Build the styled intro title overlay (PIL RGBA image).
 
     Renders 3 lines like:
         TOP 5 PLACES
         TO VISIT IN
         GOA
-    on a semi-transparent dark gradient bar, using PIL.
-    Returns a MoviePy ImageClip (RGBA) sized to VIDEO_WIDTH x VIDEO_HEIGHT.
+    on a semi-transparent dark gradient bar, sized to VIDEO_WIDTH x VIDEO_HEIGHT.
     """
     overlay = Image.new("RGBA", (get_width(), get_height()), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -880,10 +890,20 @@ def _create_title_overlay_clip(city_name: str, num_attractions: int, duration: f
     draw.text((cx - w3 // 2 + 4, y + 4), line3, font=font_city, fill=(80, 50, 0, 180))
     draw.text((cx - w3 // 2, y), line3, font=font_city, fill=(255, 210, 60, 255))
 
-    # Convert RGBA PIL image → numpy array → ImageClip
-    arr = np.array(overlay)
-    clip = ImageClip(arr, is_mask=False).with_duration(duration)
-    return clip
+    return overlay
+
+
+def _create_title_overlay_clip(city_name: str, num_attractions: int, duration: float) -> ImageClip:
+    """Intro title as a MoviePy ImageClip (legacy MoviePy engine)."""
+    arr = np.array(_build_intro_title_image(city_name, num_attractions))
+    return ImageClip(arr, is_mask=False).with_duration(duration)
+
+
+def _render_intro_title_image(city_name: str, num_attractions: int) -> str:
+    """Intro title rendered to a PNG file; returns its path (ffmpeg engine)."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    _build_intro_title_image(city_name, num_attractions).save(tmp.name)
+    return tmp.name
 
 
 def _render_subtitle_image(text: str) -> str:
@@ -1367,20 +1387,28 @@ def generate_travel_video(
         for seg_name, assets in media_map.items():
             logger.info(f"[Video Gen]   '{seg_name}': {len(assets['videos'])} videos, {len(assets['images'])} images downloaded.")
 
-        # Step 4: Compile video
+        # Step 4: Compile video — fast ffmpeg engine with MoviePy fallback.
         output_path = str(output_dir / "travel_guide.mp4")
-        logger.info(f"[Video Gen] Step 4/5 — Compiling video timeline with MoviePy (preset=ultrafast, aspect_ratio={aspect_ratio}, title='{city_name}', music_mood='{music_mood}', music_volume={music_volume}, transition_style='{transition_style}', transition_sound='{transition_sound}')...")
-        compile_video(
-            segments, 
-            media_map, 
-            audio_path, 
-            output_path, 
-            city_name=city_name, 
-            music_mood=music_mood, 
+        compile_kwargs = dict(
+            city_name=city_name,
+            music_mood=music_mood,
             music_volume=music_volume,
             transition_style=transition_style,
-            transition_sound=transition_sound
+            transition_sound=transition_sound,
         )
+        used_ffmpeg = False
+        if settings.render_engine.lower() == "ffmpeg":
+            try:
+                from app.services.ffmpeg_render import compile_video_ffmpeg
+                logger.info(f"[Video Gen] Step 4/5 — Compiling with ffmpeg engine (aspect_ratio={aspect_ratio}, music_mood='{music_mood}', transition_style='{transition_style}', transition_sound='{transition_sound}')...")
+                compile_video_ffmpeg(segments, media_map, audio_path, output_path, **compile_kwargs)
+                used_ffmpeg = True
+            except Exception as e:
+                logger.exception(f"[Video Gen] ffmpeg engine failed ({e}); falling back to MoviePy.")
+
+        if not used_ffmpeg:
+            logger.info(f"[Video Gen] Step 4/5 — Compiling video timeline with MoviePy (preset=ultrafast, aspect_ratio={aspect_ratio}, title='{city_name}', music_mood='{music_mood}', music_volume={music_volume}, transition_style='{transition_style}', transition_sound='{transition_sound}')...")
+            compile_video(segments, media_map, audio_path, output_path, **compile_kwargs)
 
         # Step 5: Return the output path (caller streams it from disk). The
         # caller marks "completed" only after moving the file into place.

@@ -98,6 +98,7 @@ function App() {
   const [previewTransitionAudio, setPreviewTransitionAudio] = useState(null);
   const [numPlaces, setNumPlaces] = useState(5);
   const [videoLength, setVideoLength] = useState('medium');
+  const [scriptStyle, setScriptStyle] = useState('reel');
   const [aspectRatio, setAspectRatio] = useState('horizontal');
   const [captionTheme, setCaptionTheme] = useState('Neon Yellow (Default)');
   
@@ -205,13 +206,14 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ 
-          message: searchQuery, 
+        body: JSON.stringify({
+          message: searchQuery,
           debug: debugMode,
           language: selectedLanguage,
           num_places: numPlaces,
           video_length: videoLength,
-          speaker: selectedSpeaker
+          speaker: selectedSpeaker,
+          script_style: scriptStyle
         }),
       });
 
@@ -998,6 +1000,42 @@ function App() {
                     </div>
                   </div>
 
+                  {/* Script Style Selector */}
+                  <div className="console-input-group">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <label className="console-input-label">Script Style</label>
+                      <span style={{ fontSize: '0.7rem', color: '#64748b' }}>
+                        {scriptStyle === 'reel' ? 'Hook · budget · itinerary · CTA' : 'Professional guide'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { mode: 'reel', label: 'Reel' },
+                        { mode: 'classic', label: 'Classic' }
+                      ].map((style) => (
+                        <button
+                          key={style.mode}
+                          type="button"
+                          disabled={loading}
+                          onClick={() => setScriptStyle(style.mode)}
+                          style={{
+                            flex: 1,
+                            padding: '8px 4px',
+                            borderRadius: '6px',
+                            border: scriptStyle === style.mode ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border-glass)',
+                            background: scriptStyle === style.mode ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                            color: scriptStyle === style.mode ? '#38bdf8' : '#64748b',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {style.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* Aspect Ratio Selector */}
                   <div className="console-input-group">
                     <label className="console-input-label">Aspect Layout</label>
@@ -1722,25 +1760,6 @@ function App() {
                         <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Resolution: {aspectRatio === 'portrait' ? '1080x1920 (Portrait)' : '1920x1080 (Wide)'}</p>
                       </div>
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                        {videoScript && (
-                          <button
-                            type="button"
-                            onClick={handleGenerateVideo}
-                            className="console-btn"
-                            style={{
-                              padding: '8px 16px',
-                              fontSize: '0.85rem',
-                              background: 'rgba(59, 130, 246, 0.15)',
-                              border: '1px solid rgba(59, 130, 246, 0.35)',
-                              color: '#60a5fa',
-                              cursor: 'pointer'
-                            }}
-                          >
-                            <Film size={14} />
-                            <span>Recompile Travel Video</span>
-                          </button>
-                        )}
-
                         <a
                           href={videoUrl}
                           download={`${query.replace(/\s+/g, '_')}_vlog.mp4`}

@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     num_places: int = Field(default=5, ge=3, le=10, description="Number of attractions to cover.")
     video_length: str = Field(default="medium", description="Length profile of script ('short', 'medium', 'long').")
     speaker: str = Field(default="Shubh", description="Voice profile for TTS generation.")
+    script_style: str = Field(default="reel", description="Narration style: 'reel' (social travel reel with hook, budget/itinerary, CTA) or 'classic' (professional guide walkthrough).")
 
 
 class ChatResponse(BaseModel):
