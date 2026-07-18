@@ -3,6 +3,9 @@ name = "gemma-langchain-fastapi"
 version = "0.1.0"
 description = "Production-ready FastAPI service exposing a LangChain agent backed by Google's Gemma models."
 requires-python = ">=3.11,<3.14"
+# NOTE: requirements.txt is the pinned lockfile used by Docker/CI. This list
+# tracks the direct runtime dependencies for `pip install -e .`; keep the two in
+# sync when adding a new top-level import.
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
@@ -10,11 +13,18 @@ dependencies = [
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.9",
     "httpx>=0.27.0",
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.2.0",
     "langchain==1.3.12",
     "langchain-google-genai==4.2.7",
+    "langgraph==1.2.8",
+    "sarvamai>=0.1.28",
+    "moviepy>=2.2.1",
+    "imageio-ffmpeg>=0.6.0",
+    "pillow>=11.0.0",
+    "numpy>=2.0.0",
 ]
 
 [project.optional-dependencies]

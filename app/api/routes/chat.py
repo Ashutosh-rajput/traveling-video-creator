@@ -479,14 +479,77 @@ async def get_last_video_metadata_endpoint():
     )
 
 
+_DIAGNOSTIC_TTS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTS Diagnostic</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
+  textarea, input { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
+  textarea { height: 6rem; }
+  button { margin-top: 1rem; padding: 0.6rem 1.2rem; font: inherit; cursor: pointer; }
+  #status { margin-top: 1rem; white-space: pre-wrap; }
+  audio { width: 100%; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>TTS Diagnostic</h1>
+<p>Posts to the same-origin <code>./tts</code> endpoint and plays the returned audio (bypasses CORS).</p>
+<label for="text">Text</label>
+<textarea id="text">Welcome to beautiful Bangalore, the vibrant Garden City of India!</textarea>
+<label for="speaker">Speaker</label>
+<input id="speaker" value="Shubh">
+<label for="lang">Language code</label>
+<input id="lang" value="en-IN">
+<button id="go">Generate &amp; Play</button>
+<div id="status"></div>
+<audio id="player" controls hidden></audio>
+<script>
+const btn = document.getElementById('go');
+const status = document.getElementById('status');
+const player = document.getElementById('player');
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  status.textContent = 'Generating...';
+  player.hidden = true;
+  try {
+    const res = await fetch('./tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: document.getElementById('text').value,
+        speaker: document.getElementById('speaker').value,
+        language_code: document.getElementById('lang').value,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      status.textContent = 'Error ' + res.status + ': ' + detail;
+      return;
+    }
+    const blob = await res.blob();
+    player.src = URL.createObjectURL(blob);
+    player.hidden = false;
+    player.play();
+    status.textContent = 'OK — ' + Math.round(blob.size / 1024) + ' KB';
+  } catch (e) {
+    status.textContent = 'Request failed: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>"""
+
+
 @router.get("/diagnostic-tts", response_class=HTMLResponse)
 async def diagnostic_tts_page():
-    """Serve the diagnostic TTS test HTML utility page directly from same origin to bypass CORS blocks."""
-    html_path = "scratch/test_tts.html"
-    if os.path.exists(html_path):
-        with open(html_path, "r", encoding="utf-8") as f:
-            return f.read()
-    raise HTTPException(status_code=404, detail="Diagnostic tool HTML file not found.")
+    """Serve a self-contained TTS test page from the same origin to bypass CORS blocks."""
+    return HTMLResponse(content=_DIAGNOSTIC_TTS_HTML)
 
 
 @router.get("/chat/reddit-search")
