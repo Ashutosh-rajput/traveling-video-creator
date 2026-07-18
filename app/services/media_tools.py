@@ -386,13 +386,13 @@ def search_all_place_media(place_name: str, limit: int = DEFAULT_LIMIT) -> dict[
             search_query = place_name
 
     def _run_pexels():
-        return search_pexels_place_media.invoke({"place_name": search_query, "limit": limit})
+        return search_pexels_place_media(place_name=search_query, limit=limit)
 
     def _run_pixabay():
-        return search_pixabay_place_media.invoke({"place_name": search_query, "limit": limit})
+        return search_pixabay_place_media(place_name=search_query, limit=limit)
 
     def _run_unsplash():
-        return search_unsplash_place_photos.invoke({"place_name": search_query, "limit": limit})
+        return search_unsplash_place_photos(place_name=search_query, limit=limit)
 
     def _run_wikimedia():
         return search_wikimedia_place_media.invoke({"place_name": search_query, "limit": limit})

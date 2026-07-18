@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Any
 
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import ToolMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -99,10 +99,10 @@ class AgentService:
         return self._llm
 
     def _build_agent(self, system_prompt: str) -> Any:
-        return create_agent(
-            model=self._build_llm(),
-            tools=get_media_tools(),
-            system_prompt=system_prompt,
+        return create_react_agent(
+            self._build_llm(),
+            get_media_tools(),
+            prompt=system_prompt,
         )
 
     def _compile_prompt(self, language: str, num_places: int, video_length: str, script_style: str = "reel") -> str:

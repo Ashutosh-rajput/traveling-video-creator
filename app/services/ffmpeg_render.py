@@ -73,12 +73,14 @@ def _kenburns_image(ffmpeg: str, src: Path, out: Path, duration: float, w: int, 
         f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
         f"scale={w * 2}:{h * 2},"
         f"zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"d={frames}:s={w}x{h}:fps={FPS},setsar=1"
+        f"d={frames}:s={w}x{h}:fps={FPS},"
+        f"unsharp=3:3:0.5:3:3:0,setsar=1"
     )
     cmd = [
         ffmpeg, "-y", "-loop", "1", "-i", str(src), "-t", f"{duration:.3f}",
         "-vf", vf, "-r", str(FPS),
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an",
+        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf),
+        "-pix_fmt", "yuv420p", "-an",
         str(out),
     ]
     ok, err = _run(cmd, timeout=180)
@@ -91,7 +93,7 @@ def _black_cut(ffmpeg: str, out: Path, duration: float, w: int, h: int) -> bool:
     cmd = [
         ffmpeg, "-y", "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r={FPS}",
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
         str(out),
     ]
     ok, _ = _run(cmd, timeout=60)
@@ -159,7 +161,8 @@ def _concat_cuts(ffmpeg: str, cuts: list[Path], work_dir: Path, w: int, h: int) 
         logger.warning("[ffmpeg] concat -c copy failed, re-encoding: %s", err)
         ok, err = _run(
             [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", str(FPS), str(concat_out)],
+             "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf),
+             "-pix_fmt", "yuv420p", "-r", str(FPS), str(concat_out)],
             timeout=600,
         )
     if not ok:
@@ -440,9 +443,11 @@ def compile_video_ffmpeg(
     cmd = [
         ffmpeg, "-y", *inputs,
         *video_args, "-map", "1:a", "-shortest",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", settings.render_preset, "-crf", str(settings.render_crf),
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high", "-level", "4.2", "-x264-params", "ref=4:bframes=3",
         "-threads", str(settings.render_threads),
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", settings.render_audio_bitrate, "-ar", "44100", "-movflags", "+faststart",
         str(Path(output_path).resolve()),
     ]
     ok, err = _run(cmd, cwd=str(work_dir), timeout=900)

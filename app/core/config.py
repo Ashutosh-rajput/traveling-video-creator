@@ -38,6 +38,23 @@ class Settings(BaseSettings):
     # "moviepy" (legacy fallback). ffmpeg is much faster and lower-memory.
     render_engine: str = "ffmpeg"
 
+    # Output quality tuning. Higher quality = larger files + slower/heavier
+    # encodes. Lower these back toward "ultrafast"/23 on memory- or CPU-limited
+    # hosts if renders time out or OOM.
+    #   render_preset : x264 speed/compression trade-off. Slower = better quality
+    #                   per byte. One of: ultrafast, superfast, veryfast, faster,
+    #                   fast, medium, slow, slower, veryslow.
+    #   render_crf    : constant quality, 0 (lossless) .. 51 (worst). Lower =
+    #                   better looking + bigger. 18 ≈ visually lossless, 23 =
+    #                   x264 default, 28 = small/low.
+    #   render_fps    : output frames per second. 30 = smooth, 24 = cinematic/
+    #                   lighter, 60 = very smooth but ~2x the frames to encode.
+    #   render_audio_bitrate : AAC audio bitrate, e.g. 128k, 160k, 192k, 256k.
+    render_preset: str = "medium"
+    render_crf: int = 18
+    render_fps: int = 30
+    render_audio_bitrate: str = "192k"
+
     # Personal Google Drive OAuth configuration. Create an OAuth "Desktop/Web"
     # client in Google Cloud and register this callback URL there.
     gdrive_client_id: str = Field(default="", repr=False)

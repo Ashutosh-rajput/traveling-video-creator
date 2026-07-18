@@ -342,7 +342,7 @@ def get_width() -> int:
 def get_height() -> int:
     return _video_height_var.get()
 
-FPS = 24
+FPS = settings.render_fps
 CROSSFADE_DURATION = 0.8  # seconds of cross-dissolve between segments
 SILENCE_GAP = 0.6  # seconds of silence between attraction segments
 MAX_DOWNLOAD_WORKERS = 6
@@ -724,7 +724,10 @@ def _ffmpeg_trim_scale(src: Path, out: Path, duration: float, target_w: int, tar
     exe = _ffmpeg_exe()
     if not exe:
         return False
-    vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1"
+    vf = (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={target_w}:{target_h},setsar=1"
+    )
     cmd = [
         exe, "-y",
         "-stream_loop", "-1",   # loop a too-short source; ignored when long enough
@@ -733,7 +736,9 @@ def _ffmpeg_trim_scale(src: Path, out: Path, duration: float, target_w: int, tar
         "-vf", vf,
         "-r", str(FPS),
         "-an",                   # source audio is unused (voiceover is added later)
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        # Intermediate cut: keep a fast preset (it's re-encoded in the final pass)
+        # but honour the quality CRF so low-quality configs stay light throughout.
+        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
         str(out),
     ]
     try:
@@ -1246,10 +1251,11 @@ def compile_video(
         fps=FPS,
         codec="libx264",
         audio_codec="aac",
+        audio_bitrate=settings.render_audio_bitrate,
         threads=settings.render_threads,
-        preset="ultrafast",
+        preset=settings.render_preset,
         logger=moviepy_logger,
-        ffmpeg_params=["-pix_fmt", "yuv420p"]
+        ffmpeg_params=["-pix_fmt", "yuv420p", "-crf", str(settings.render_crf), "-movflags", "+faststart"]
     )
 
     # Cleanup to prevent file locks
