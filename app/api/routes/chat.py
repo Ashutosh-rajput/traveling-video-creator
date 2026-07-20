@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import urllib.parse
+import uuid
 
 from dotenv import set_key
 
@@ -206,6 +207,97 @@ async def delete_background_music_file_endpoint(filename: str):
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Background music file '{safe_filename}' not found."
     )
+
+
+# --------------------------------------------------------------------------- #
+# User-uploaded media (per-attraction custom photos / videos)
+# --------------------------------------------------------------------------- #
+
+UPLOADS_DIR = "data/uploads"
+_ALLOWED_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+_ALLOWED_VIDEO_EXT = (".mp4", ".mov", ".webm", ".m4v")
+
+
+@router.post("/chat/uploads")
+async def upload_media_endpoint(request: Request, file: UploadFile = File(...)):
+    """Accept a user-supplied photo or video for use as attraction media.
+
+    Saves the file under data/uploads with a unique name and returns an absolute
+    URL plus its media type ('photo' or 'video'). The render pipeline reads the
+    file directly from disk (see video._download_file), so the returned URL is
+    only used for in-browser preview."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext in _ALLOWED_IMAGE_EXT:
+        media_type = "photo"
+    elif ext in _ALLOWED_VIDEO_EXT:
+        media_type = "video"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Unsupported file type. Allowed: "
+                f"{', '.join(_ALLOWED_IMAGE_EXT + _ALLOWED_VIDEO_EXT)}"
+            ),
+        )
+
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    safe_filename = f"{uuid.uuid4().hex}{ext}"
+    dest_path = os.path.join(UPLOADS_DIR, safe_filename)
+
+    try:
+        content = await file.read()
+        with open(dest_path, "wb") as buffer:
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save uploaded file: {str(e)}",
+        )
+
+    base = str(request.base_url).rstrip("/")
+    url = f"{base}{settings.api_v1_prefix}/chat/uploads/file/{safe_filename}"
+    return {"status": "success", "url": url, "type": media_type, "filename": safe_filename}
+
+
+@router.get("/chat/uploads/file/{filename}")
+async def get_uploaded_media_endpoint(filename: str):
+    """Serve a previously uploaded media file (for in-browser preview)."""
+    safe_filename = os.path.basename(filename)
+    path = os.path.join(UPLOADS_DIR, safe_filename)
+    if os.path.exists(path):
+        return FileResponse(path)
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Uploaded file '{safe_filename}' not found.",
+    )
+
+
+def _cleanup_uploads(keep_assets: list) -> None:
+    """Delete accumulated uploaded media, preserving only the files referenced
+    by the current render's selected assets. Called when a render starts so the
+    uploads folder doesn't grow unbounded."""
+    if not os.path.isdir(UPLOADS_DIR):
+        return
+
+    keep: set[str] = set()
+    for item in keep_assets:
+        url = item.get("url", "") if isinstance(item, dict) else ""
+        if "/chat/uploads/file/" in url:
+            keep.add(os.path.basename(urllib.parse.urlparse(url).path))
+
+    removed = 0
+    try:
+        for f in os.listdir(UPLOADS_DIR):
+            if f not in keep:
+                try:
+                    os.remove(os.path.join(UPLOADS_DIR, f))
+                    removed += 1
+                except OSError:
+                    pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to clean uploads dir: {e}")
+    if removed:
+        logging.getLogger(__name__).info(f"[Uploads] Cleaned {removed} stale uploaded file(s), kept {len(keep)}.")
 
 
 @router.get("/chat/transition-sounds")
@@ -415,6 +507,9 @@ async def generate_video_endpoint(payload: VideoRequest):
                     os.remove(os.path.join(output_dir, f))
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to clear output videos directory: {e}")
+
+    # Garbage-collect old uploaded media, keeping only the files this render uses.
+    _cleanup_uploads(list(payload.pics) + list(payload.videos))
 
     city_name = payload.city_name or ""
     # Reset progress synchronously so an early poll can't observe a previous

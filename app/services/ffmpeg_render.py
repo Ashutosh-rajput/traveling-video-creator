@@ -422,14 +422,23 @@ def compile_video_ffmpeg(
             from app.services.video import _render_intro_title_image
             n = sum(1 for s in segments if s.attraction_name != "Intro")
             intro_png = _render_intro_title_image(city_name, n)
-            intro_end = float(intro_seg.audio_duration)
+            # Show the poster title for the first 3 seconds of the intro (or the
+            # whole intro if it is shorter).
+            intro_end = min(3.0, float(intro_seg.audio_duration))
         except Exception as e:  # noqa: BLE001
             logger.warning("[ffmpeg] intro title render failed: %s", e)
             intro_png = None
 
     inputs = ["-i", str(concat_out.resolve()), "-i", str(Path(audio_path).resolve())]
     if intro_png:
-        inputs += ["-i", str(Path(intro_png).resolve())]
+        # Loop the still title into a short video stream so the alpha fade can
+        # animate. A single-frame image input would collapse to the fade-in's
+        # first (transparent) frame and stay invisible.
+        title_stream_dur = intro_end + 0.6
+        inputs += [
+            "-loop", "1", "-framerate", str(FPS), "-t", f"{title_stream_dur:.2f}",
+            "-i", str(Path(intro_png).resolve()),
+        ]
         fade_out_st = max(0.0, intro_end - 0.5)
         fc = (
             f"[2:v]format=rgba,fade=t=in:st=0:d=0.5:alpha=1,fade=t=out:st={fade_out_st:.2f}:d=0.5:alpha=1[title];"

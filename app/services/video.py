@@ -538,7 +538,28 @@ _DOWNLOAD_HEADERS = {
 
 
 def _download_file(url: str, dest: Path) -> bool:
-    """Download a file from URL to local path. Returns True on success."""
+    """Download a file from URL to local path. Returns True on success.
+
+    User-uploaded media (served at /chat/uploads/file/<name>) is copied straight
+    from data/uploads on disk instead of issuing an HTTP request back to our own
+    server, which is unreliable behind a reverse proxy / in containers.
+    """
+    import logging
+
+    marker = "/chat/uploads/file/"
+    if marker in url:
+        try:
+            from urllib.parse import urlparse
+            fname = os.path.basename(urlparse(url).path)
+            local = Path("data/uploads") / fname
+            if local.exists():
+                dest.write_bytes(local.read_bytes())
+                return True
+            logging.getLogger(__name__).warning(f"[Video Gen] Uploaded media not found on disk: {local}")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"[Video Gen] Local upload read failed for {url}: {e}")
+            # Fall through to the HTTP path as a last resort.
+
     try:
         with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, headers=_DOWNLOAD_HEADERS) as client:
             resp = client.get(url)
@@ -546,7 +567,6 @@ def _download_file(url: str, dest: Path) -> bool:
             dest.write_bytes(resp.content)
         return True
     except Exception as e:
-        import logging
         logging.getLogger(__name__).warning(f"[Video Gen] Media download failed for {url}: {e}")
         return False
 
@@ -818,82 +838,70 @@ def _create_black_frame() -> str:
 
 
 def _build_intro_title_image(city_name: str, num_attractions: int):
-    """Build the styled intro title overlay (PIL RGBA image).
+    """Build the styled intro title overlay (PIL RGBA image), poster-style:
 
-    Renders 3 lines like:
-        TOP 5 PLACES
-        TO VISIT IN
-        GOA
-    on a semi-transparent dark gradient bar, sized to VIDEO_WIDTH x VIDEO_HEIGHT.
+        TOP 5
+        PLACES
+        IN GOA
+        MOST TOURISTS
+        DON'T KNOW ABOUT!
+
+    Bold, centred, golden/white text with a heavy dark outline over a soft dark
+    band, sized to VIDEO_WIDTH x VIDEO_HEIGHT.
     """
-    overlay = Image.new("RGBA", (get_width(), get_height()), (0, 0, 0, 0))
+    W, H = get_width(), get_height()
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    city_upper = city_name.upper()
-    line1 = f"TOP {num_attractions} PLACES"
-    line2 = "TO VISIT IN"
-    line3 = city_upper
+    city_upper = (city_name or "").upper().strip() or "THIS PLACE"
 
-    bar_right = get_width() * 2 // 3  # cover left 2/3 of screen
-    max_text_width = bar_right - 120  # max boundary
+    YELLOW = (255, 208, 45, 255)
+    WHITE = (255, 255, 255, 255)
+    OUTLINE = (18, 18, 18, 255)
 
-    # Load initial fonts using dynamic Indic language detection
+    # Scale everything to the render height (base sizes tuned for 1080p).
+    s = max(0.4, H / 1080.0)
+    max_w = W - int(160 * s)
+    stroke_w = max(2, int(7 * s))
+    gap = int(22 * s)
+
     font_paths = _get_font_paths(city_name, bold=True)
-    font_big = _load_font(font_paths, 160)
-    font_mid = _load_font(font_paths, 110)
-    font_city = _load_font(font_paths, 200)
 
-    # Dynamic scaling for Line 1
-    w1 = draw.textbbox((0, 0), line1, font=font_big)[2]
-    if w1 > max_text_width:
-        font_big = _load_font(font_paths, int(160 * (max_text_width / w1)))
+    # (text, base font size at 1080p, colour)
+    spec = [
+        (f"TOP {num_attractions}", 172, YELLOW),
+        ("PLACES", 150, YELLOW),
+        (f"IN {city_upper}", 104, WHITE),
+        ("MOST TOURISTS", 68, WHITE),
+        ("DON'T KNOW ABOUT!", 112, YELLOW),
+    ]
 
-    # Dynamic scaling for Line 2
-    w2 = draw.textbbox((0, 0), line2, font=font_mid)[2]
-    if w2 > max_text_width:
-        font_mid = _load_font(font_paths, int(110 * (max_text_width / w2)))
+    # Resolve fonts, shrinking any line that would overflow the safe width.
+    prepared = []
+    for text, size, color in spec:
+        font = _load_font(font_paths, max(22, int(size * s)))
+        tw = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)[2]
+        if tw > max_w:
+            font = _load_font(font_paths, max(22, int(size * s * (max_w / tw))))
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)
+        prepared.append((text, font, color, bbox))
 
-    # Dynamic scaling for Line 3 (City name)
-    w3 = draw.textbbox((0, 0), line3, font=font_city)[2]
-    if w3 > max_text_width:
-        new_size = int(200 * (max_text_width / w3))
-        font_city = _load_font(font_paths, max(new_size, 50))
+    total_h = sum(b[3] - b[1] for *_, b in prepared) + gap * (len(prepared) - 1)
 
-    pad = 60
-    # Measure heights with final fonts
-    h1 = draw.textbbox((0, 0), line1, font=font_big)[3]
-    h2 = draw.textbbox((0, 0), line2, font=font_mid)[3]
-    h3 = draw.textbbox((0, 0), line3, font=font_city)[3]
-    total_text_h = h1 + h2 + h3 + pad * 3
+    # Soft full-width dark band behind the text block for legibility.
+    pad_y = int(60 * s)
+    block_top = (H - total_h) // 2 - pad_y
+    block_bottom = (H + total_h) // 2 + pad_y
+    draw.rectangle([(0, block_top), (W, block_bottom)], fill=(0, 0, 0, 120))
 
-    bar_top    = get_height() // 2 - total_text_h // 2 - pad
-    bar_bottom = get_height() // 2 + total_text_h // 2 + pad
-    bar_left   = 0
-
-    # Draw semi-transparent dark gradient bar
-    for x in range(bar_left, bar_right):
-        alpha = int(210 * (1 - (x / bar_right) ** 2))
-        draw.rectangle([(x, bar_top), (x + 1, bar_bottom)], fill=(0, 0, 0, alpha))
-
-    # Draw each line centred on the bar's left portion
-    cx = bar_right // 2
-    y = bar_top + pad
-
-    # Line 1 — white
-    w1 = draw.textbbox((0, 0), line1, font=font_big)[2]
-    draw.text((cx - w1 // 2, y), line1, font=font_big, fill=(255, 255, 255, 240))
-    y += h1 + pad // 2
-
-    # Line 2 — light grey
-    w2 = draw.textbbox((0, 0), line2, font=font_mid)[2]
-    draw.text((cx - w2 // 2, y), line2, font=font_mid, fill=(210, 210, 210, 220))
-    y += h2 + pad // 2
-
-    # Line 3 — golden accent
-    w3 = draw.textbbox((0, 0), line3, font=font_city)[2]
-    # Drop shadow
-    draw.text((cx - w3 // 2 + 4, y + 4), line3, font=font_city, fill=(80, 50, 0, 180))
-    draw.text((cx - w3 // 2, y), line3, font=font_city, fill=(255, 210, 60, 255))
+    # Draw each line centred, with a heavy outline.
+    y = (H - total_h) // 2
+    for text, font, color, bbox in prepared:
+        tw = bbox[2] - bbox[0]
+        x = (W - tw) // 2 - bbox[0]
+        draw.text((x, y - bbox[1]), text, font=font, fill=color,
+                  stroke_width=stroke_w, stroke_fill=OUTLINE)
+        y += (bbox[3] - bbox[1]) + gap
 
     return overlay
 
@@ -1103,7 +1111,11 @@ def compile_video(
         if is_intro:
             if city_name:
                 try:
-                    title = _create_title_overlay_clip(city_name, num_attractions, narr_dur)
+                    # Show the poster title for the first 3 seconds of the intro.
+                    title_dur = min(3.0, narr_dur)
+                    title = (_create_title_overlay_clip(city_name, num_attractions, title_dur)
+                             .with_start(0)
+                             .with_effects([FadeIn(duration=0.5), FadeOut(duration=0.5)]))
                     clip = CompositeVideoClip([clip, title])
                 except Exception as e:
                     import logging

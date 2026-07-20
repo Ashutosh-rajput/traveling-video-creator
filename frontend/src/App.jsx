@@ -16,7 +16,8 @@ import {
   Tv,
   FileText,
   Layers,
-  Cloud
+  Cloud,
+  Upload
 } from 'lucide-react';
 import './App.css';
 
@@ -109,6 +110,7 @@ function App() {
   const [canvasTab, setCanvasTab] = useState('video');
   const [lightboxItem, setLightboxItem] = useState(null);
   const [selectedMedia, setSelectedMedia] = useState({}); // { attractionLabel: [asset1, asset2] }
+  const [uploadingLabel, setUploadingLabel] = useState(null); // attraction currently uploading custom media
   
   // Google Drive upload states
   const [gdriveUploading, setGdriveUploading] = useState(false);
@@ -294,6 +296,64 @@ function App() {
         [label]: next
       };
     });
+  };
+
+  // Upload a user-supplied photo/video for a specific attraction. The file is
+  // sent to the backend, added to that attraction's candidate list, and
+  // auto-selected (respecting the per-attraction cap).
+  const handleUploadOwnMedia = async (label, file) => {
+    if (!file || uploadingLabel) return;
+    const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+    if (file.size > MAX_BYTES) {
+      alert('File is too large. Please upload media under 100 MB.');
+      return;
+    }
+
+    setUploadingLabel(label);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(buildUrl('/api/v1/chat/uploads'), {
+        method: 'POST',
+        body: form,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to upload media.');
+      }
+      const data = await res.json();
+      const isVideo = data.type === 'video';
+      const asset = {
+        url: data.url,
+        label,
+        title: file.name,
+        provider: 'upload',
+        type: isVideo ? 'video' : 'photo',
+      };
+
+      // Add to the candidate pool so it renders as a selectable card.
+      if (isVideo) {
+        setVideos(prev => [...prev, asset]);
+      } else {
+        setPics(prev => [...prev, asset]);
+      }
+
+      // Auto-select it, honouring the cap (2, or 3 photos when no video exists).
+      const willHaveVideo = isVideo || videos.some(v => v.label === label);
+      const maxSelect = willHaveVideo ? 2 : 3;
+      setSelectedMedia(prev => {
+        const current = prev[label] || [];
+        const next = current.length >= maxSelect
+          ? [...current.slice(current.length - maxSelect + 1), asset]
+          : [...current, asset];
+        return { ...prev, [label]: next };
+      });
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Failed to upload media.');
+    } finally {
+      setUploadingLabel(null);
+    }
   };
 
   const handleGDriveUpload = async () => {
@@ -2175,9 +2235,49 @@ function App() {
                           </div>
 
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <label
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                padding: '4px 10px',
+                                borderRadius: '20px',
+                                border: '1px solid rgba(168, 85, 247, 0.4)',
+                                background: 'rgba(168, 85, 247, 0.12)',
+                                color: '#c084fc',
+                                cursor: uploadingLabel ? 'not-allowed' : 'pointer',
+                                opacity: (uploadingLabel && uploadingLabel !== label) ? 0.5 : 1,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {uploadingLabel === label ? (
+                                <>
+                                  <Loader2 size={13} className="stage-spinner" />
+                                  <span>Uploading...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Upload size={13} />
+                                  <span>Upload your own</span>
+                                </>
+                              )}
+                              <input
+                                type="file"
+                                accept="image/*,video/*"
+                                disabled={!!uploadingLabel}
+                                style={{ display: 'none' }}
+                                onChange={(e) => {
+                                  const f = e.target.files && e.target.files[0];
+                                  if (f) handleUploadOwnMedia(label, f);
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
                             {isReady ? (
-                              <span style={{ 
-                                background: 'rgba(34, 197, 94, 0.15)', 
+                              <span style={{
+                                background: 'rgba(34, 197, 94, 0.15)',
                                 border: '1px solid rgba(34, 197, 94, 0.4)', 
                                 color: '#4ade80',
                                 fontSize: '0.75rem',
