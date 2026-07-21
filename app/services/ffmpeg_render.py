@@ -79,7 +79,7 @@ def _kenburns_image(ffmpeg: str, src: Path, out: Path, duration: float, w: int, 
     cmd = [
         ffmpeg, "-y", "-loop", "1", "-i", str(src), "-t", f"{duration:.3f}",
         "-vf", vf, "-r", str(FPS),
-        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf),
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(settings.render_crf),
         "-pix_fmt", "yuv420p", "-an",
         str(out),
     ]
@@ -93,7 +93,7 @@ def _black_cut(ffmpeg: str, out: Path, duration: float, w: int, h: int) -> bool:
     cmd = [
         ffmpeg, "-y", "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r={FPS}",
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
         str(out),
     ]
     ok, _ = _run(cmd, timeout=60)
@@ -161,7 +161,7 @@ def _concat_cuts(ffmpeg: str, cuts: list[Path], work_dir: Path, w: int, h: int) 
         logger.warning("[ffmpeg] concat -c copy failed, re-encoding: %s", err)
         ok, err = _run(
             [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-             "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf),
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(settings.render_crf),
              "-pix_fmt", "yuv420p", "-r", str(FPS), str(concat_out)],
             timeout=600,
         )
@@ -373,6 +373,7 @@ def compile_video_ffmpeg(
     music_volume: float = 0.5,
     transition_style: str = "none",
     transition_sound: str = "none",
+    intro_image_path: str | None = None,
 ) -> str:
     ffmpeg = _ffmpeg_exe()
     if not ffmpeg:
@@ -413,35 +414,39 @@ def compile_video_ffmpeg(
         from app.services.video import set_generation_progress
         set_generation_progress(city_name, "rendering", 90, "Burning captions and muxing audio...")
 
-    # Rich intro title overlay (reuses the legacy PIL renderer) faded over the
-    # intro segment — restores the original "TOP N PLACES / TO VISIT IN / CITY" look.
+    # Intro title shown flat over the first 3 seconds of the intro (no fade/anim).
+    # Either the AI-generated banner image (full-frame, opaque) or the PIL text
+    # poster (full-frame, transparent) — both use the same overlay mechanism.
     intro_seg = segments[0] if segments and segments[0].attraction_name == "Intro" else None
     intro_png = None
-    if intro_seg is not None and city_name:
-        try:
-            from app.services.video import _render_intro_title_image
-            n = sum(1 for s in segments if s.attraction_name != "Intro")
-            intro_png = _render_intro_title_image(city_name, n)
-            # Show the poster title for the first 3 seconds of the intro (or the
-            # whole intro if it is shorter).
-            intro_end = min(3.0, float(intro_seg.audio_duration))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[ffmpeg] intro title render failed: %s", e)
-            intro_png = None
+    if intro_seg is not None:
+        intro_end = min(3.0, float(intro_seg.audio_duration))
+        if intro_image_path and Path(intro_image_path).exists():
+            intro_png = intro_image_path
+        elif city_name:
+            try:
+                from app.services.video import _render_intro_title_image
+                n = sum(1 for s in segments if s.attraction_name != "Intro")
+                intro_png = _render_intro_title_image(city_name, n)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[ffmpeg] intro title render failed: %s", e)
+                intro_png = None
 
     inputs = ["-i", str(concat_out.resolve()), "-i", str(Path(audio_path).resolve())]
     if intro_png:
-        # Loop the still title into a short video stream so the alpha fade can
-        # animate. A single-frame image input would collapse to the fade-in's
-        # first (transparent) frame and stay invisible.
-        title_stream_dur = intro_end + 0.6
-        inputs += [
-            "-loop", "1", "-framerate", str(FPS), "-t", f"{title_stream_dur:.2f}",
-            "-i", str(Path(intro_png).resolve()),
-        ]
-        fade_out_st = max(0.0, intro_end - 0.5)
+        # Feed the title as a SINGLE still frame (no -loop). overlay holds it via
+        # repeatlast and composites it flat during the enable window (no fade).
+        #
+        # IMPORTANT: do NOT loop the title into a timed stream here. The concat
+        # video is stream-copied (-c copy) from separately-encoded cuts, so it
+        # carries timestamp discontinuities at segment boundaries. Feeding a
+        # second *timed* stream into overlay makes its framesync stall forever on
+        # those discontinuities (the render hangs until it hits the timeout). A
+        # single still frame has no timeline to sync, so it can't stall.
+        inputs += ["-i", str(Path(intro_png).resolve())]
         fc = (
-            f"[2:v]format=rgba,fade=t=in:st=0:d=0.5:alpha=1,fade=t=out:st={fade_out_st:.2f}:d=0.5:alpha=1[title];"
+            f"[2:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,format=rgba[title];"
             f"[0:v][title]overlay=enable='between(t,0,{intro_end:.2f})'[ov];"
             f"[ov]ass=subs.ass[v]"
         )
@@ -454,12 +459,11 @@ def compile_video_ffmpeg(
         *video_args, "-map", "1:a", "-shortest",
         "-c:v", "libx264", "-preset", settings.render_preset, "-crf", str(settings.render_crf),
         "-pix_fmt", "yuv420p",
-        "-profile:v", "high", "-level", "4.2", "-x264-params", "ref=4:bframes=3",
         "-threads", str(settings.render_threads),
         "-c:a", "aac", "-b:a", settings.render_audio_bitrate, "-ar", "44100", "-movflags", "+faststart",
         str(Path(output_path).resolve()),
     ]
-    ok, err = _run(cmd, cwd=str(work_dir), timeout=900)
+    ok, err = _run(cmd, cwd=str(work_dir), timeout=2000)
     if not ok:
         raise RuntimeError(f"ffmpeg final mux failed: {err}")
     return output_path

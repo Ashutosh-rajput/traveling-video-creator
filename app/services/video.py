@@ -756,9 +756,9 @@ def _ffmpeg_trim_scale(src: Path, out: Path, duration: float, target_w: int, tar
         "-vf", vf,
         "-r", str(FPS),
         "-an",                   # source audio is unused (voiceover is added later)
-        # Intermediate cut: keep a fast preset (it's re-encoded in the final pass)
-        # but honour the quality CRF so low-quality configs stay light throughout.
-        "-c:v", "libx264", "-preset", "fast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
+        # Intermediate cut: ultrafast — it is fully re-encoded in the final pass,
+        # so its preset does not affect final quality, only production speed.
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(settings.render_crf), "-pix_fmt", "yuv420p",
         str(out),
     ]
     try:
@@ -1059,6 +1059,7 @@ def compile_video(
     music_volume: float = 0.5,
     transition_style: str = "none",
     transition_sound: str = "none",
+    intro_image_path: str | None = None,
 ) -> str:
     """Compile the final travel guide video.
 
@@ -1109,13 +1110,20 @@ def compile_video(
 
         # Title overlay for Intro vs Attraction segments
         if is_intro:
-            if city_name:
+            if intro_image_path or city_name:
                 try:
-                    # Show the poster title for the first 3 seconds of the intro.
+                    # Static intro over the first 3 seconds of the intro — no
+                    # fade / no animation. Prefer the AI banner image (full-frame)
+                    # over the PIL text poster when one was generated.
                     title_dur = min(3.0, narr_dur)
-                    title = (_create_title_overlay_clip(city_name, num_attractions, title_dur)
-                             .with_start(0)
-                             .with_effects([FadeIn(duration=0.5), FadeOut(duration=0.5)]))
+                    if intro_image_path and os.path.exists(intro_image_path):
+                        title = (ImageClip(intro_image_path)
+                                 .resized((get_width(), get_height()))
+                                 .with_start(0)
+                                 .with_duration(title_dur))
+                    else:
+                        title = (_create_title_overlay_clip(city_name, num_attractions, title_dur)
+                                 .with_start(0))
                     clip = CompositeVideoClip([clip, title])
                 except Exception as e:
                     import logging
@@ -1342,6 +1350,8 @@ def generate_travel_video(
     transition_style: str = "none",
     transition_sound: str = "none",
     caption_theme: str = "Neon Yellow (Default)",
+    intro_mode: str = "text",
+    intro_image_url: str = "",
 ) -> str:
     """End-to-end travel guide video generation. Returns the output file path."""
     import logging
@@ -1407,12 +1417,25 @@ def generate_travel_video(
 
         # Step 4: Compile video — fast ffmpeg engine with MoviePy fallback.
         output_path = str(output_dir / "travel_guide.mp4")
+        # Resolve an AI intro image URL to its local uploads path (if selected).
+        intro_image_path = None
+        if intro_mode == "image" and intro_image_url:
+            marker = "/chat/uploads/file/"
+            if marker in intro_image_url:
+                fname = intro_image_url.split(marker, 1)[1].split("/")[0].split("?")[0]
+                candidate = Path("data/uploads") / fname
+                if candidate.exists():
+                    intro_image_path = str(candidate)
+                else:
+                    logger.warning(f"[Video Gen] Intro image not found on disk: {candidate}; using text intro.")
+
         compile_kwargs = dict(
             city_name=city_name,
             music_mood=music_mood,
             music_volume=music_volume,
             transition_style=transition_style,
             transition_sound=transition_sound,
+            intro_image_path=intro_image_path,
         )
         used_ffmpeg = False
         if settings.render_engine.lower() == "ffmpeg":

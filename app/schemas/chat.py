@@ -46,3 +46,14 @@ class EditScriptRequest(BaseModel):
 
 class EditScriptResponse(BaseModel):
     video_script: str = ""
+
+
+class IntroImageRequest(BaseModel):
+    city_name: str = Field(default="", description="Destination city for the intro banner headline.")
+    places: list[str] = Field(default_factory=list, description="Attraction names to reflect in the banner imagery.")
+    num_places: int = Field(default=5, ge=1, le=10, description="Number shown in the 'TOP N' headline.")
+
+
+class IntroImageResponse(BaseModel):
+    url: str
+    prompt: str = ""

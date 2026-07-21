@@ -11,8 +11,17 @@ import uuid
 from dotenv import set_key
 
 from app.core.config import settings
-from app.schemas.chat import ChatRequest, ChatResponse, EditScriptRequest, EditScriptResponse, MediaAsset
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    EditScriptRequest,
+    EditScriptResponse,
+    IntroImageRequest,
+    IntroImageResponse,
+    MediaAsset,
+)
 from app.services.agent import AgentService, get_agent_service
+from app.services.intro_image import cloudflare_configured, generate_image_bytes
 from app.services.progress import get_progress, set_progress
 from app.services.tts import generate_tts
 from app.services.video import generate_travel_video, set_generation_progress
@@ -41,6 +50,8 @@ class VideoRequest(BaseModel):
     transition_style: str = Field(default="none", description="Visual transition style ('none', 'fade', 'zoom', 'slide').")
     transition_sound: str = Field(default="none", description="Transition sound effect ('none', 'whoosh', 'click', 'glitch').")
     caption_theme: str = Field(default="Neon Yellow (Default)", description="Subtitles visual preset style")
+    intro_mode: str = Field(default="text", description="Intro title style: 'text' (static PIL poster) or 'image' (AI-generated banner).")
+    intro_image_url: str = Field(default="", description="URL of the generated AI intro image (used when intro_mode='image').")
 
 
 @router.get("/login/google")
@@ -300,6 +311,52 @@ def _cleanup_uploads(keep_assets: list) -> None:
         logging.getLogger(__name__).info(f"[Uploads] Cleaned {removed} stale uploaded file(s), kept {len(keep)}.")
 
 
+@router.post("/chat/generate-intro-image", response_model=IntroImageResponse)
+async def generate_intro_image_endpoint(
+    payload: IntroImageRequest,
+    request: Request,
+    agent_service: AgentService = Depends(get_agent_service),
+) -> IntroImageResponse:
+    """Generate an AI intro banner image via Cloudflare, using a Gemma-written
+    prompt that reflects the destination and its attractions. Returns a served
+    URL (saved under data/uploads) for in-browser preview; the render pipeline
+    reads it from disk."""
+    if not cloudflare_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cloudflare image generation is not configured. Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env.",
+        )
+
+    try:
+        prompt = await agent_service.write_intro_image_prompt(
+            payload.city_name, payload.places, payload.num_places
+        )
+        image_bytes = await asyncio.to_thread(generate_image_bytes, prompt)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Intro image generation failed: {exc}",
+        ) from exc
+
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    safe_filename = f"intro_{uuid.uuid4().hex}.png"
+    dest_path = os.path.join(UPLOADS_DIR, safe_filename)
+    try:
+        with open(dest_path, "wb") as buffer:
+            buffer.write(image_bytes)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save generated intro image: {exc}",
+        ) from exc
+
+    base = str(request.base_url).rstrip("/")
+    url = f"{base}{settings.api_v1_prefix}/chat/uploads/file/{safe_filename}"
+    return IntroImageResponse(url=url, prompt=prompt)
+
+
 @router.get("/chat/transition-sounds")
 async def list_transition_sounds_endpoint():
     """List all available transition sound effects from the data folder."""
@@ -508,8 +565,12 @@ async def generate_video_endpoint(payload: VideoRequest):
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to clear output videos directory: {e}")
 
-    # Garbage-collect old uploaded media, keeping only the files this render uses.
-    _cleanup_uploads(list(payload.pics) + list(payload.videos))
+    # Garbage-collect old uploaded media, keeping only the files this render uses
+    # (selected assets + the chosen AI intro image, all of which live in uploads).
+    keep_assets = list(payload.pics) + list(payload.videos)
+    if payload.intro_image_url:
+        keep_assets.append({"url": payload.intro_image_url})
+    _cleanup_uploads(keep_assets)
 
     city_name = payload.city_name or ""
     # Reset progress synchronously so an early poll can't observe a previous
@@ -532,6 +593,8 @@ async def generate_video_endpoint(payload: VideoRequest):
                 payload.transition_style,
                 payload.transition_sound,
                 payload.caption_theme,
+                payload.intro_mode,
+                payload.intro_image_url,
             )
 
             # Move to a stable, city-named filename for nicer downloads / Drive upload.

@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     pixabay_api_key: str = Field(default="", repr=False)
     unsplash_access_key: str = Field(default="", repr=False)
 
+    # Cloudflare Workers AI — used to generate the optional AI intro title image.
+    # Free-tier text-to-image (Gemini/Imagen currently has no free image quota).
+    cloudflare_account_id: str = Field(default="", repr=False)
+    cloudflare_api_token: str = Field(default="", repr=False)
+    cloudflare_image_model: str = "@cf/black-forest-labs/flux-1-schnell"
+
     sarvam_api_key: str = Field(default="", repr=False)
     sarvam_lang: str = "en-IN"
     sarvam_pace: float = 1.2

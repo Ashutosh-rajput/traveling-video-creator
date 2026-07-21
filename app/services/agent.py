@@ -490,6 +490,51 @@ class AgentService:
         logger.info(f"[Agent] Script edited (~{len(revised.split())} words).")
         return revised
 
+    async def write_intro_image_prompt(self, city_name: str, places: list[str], num_places: int) -> str:
+        """Ask the LLM to write a single text-to-image prompt for an intro title
+        banner, incorporating the actual destination and attraction names."""
+        logger = logging.getLogger(__name__)
+        llm = self._build_llm()
+
+        place_list = ", ".join(p for p in places if p) or city_name
+
+        system_prompt = (
+            "You write ONE detailed text-to-image generation prompt for a modern travel "
+            "intro banner (16:9). The banner must feature bold headline typography reading "
+            f"'TOP {num_places} PLACES IN {city_name.upper()}' and 'MOST TOURISTS DON'T KNOW ABOUT' "
+            "in a bold condensed sans-serif — 'TOP' and the number in golden yellow, the city in "
+            "bright cyan, the rest in white, over a dark navy background with a torn-paper edge. "
+            "Describe a few rounded photo frames showing scenery that fits the specific attractions "
+            "provided (e.g. beaches, forts, temples, waterfalls as appropriate). Vibrant, high "
+            "contrast, tourism-marketing style. Return ONLY the prompt text — no preamble, no quotes."
+        )
+        user_prompt = (
+            f"Destination city: {city_name}\n"
+            f"Attractions to reflect in the imagery: {place_list}\n"
+            "Write the image prompt now."
+        )
+
+        result = await llm.ainvoke([("system", system_prompt), ("human", user_prompt)])
+        prompt = self._flatten_content(getattr(result, "content", result)).strip()
+        if prompt.startswith("```"):
+            lines = prompt.split("\n")
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            prompt = "\n".join(lines).strip()
+
+        if not prompt:
+            # Deterministic fallback so image generation still works.
+            prompt = (
+                f"Modern travel banner, dark navy background, torn paper edges, bold headline "
+                f"'TOP {num_places} PLACES IN {city_name.upper()}' with 'TOP' and number in golden "
+                f"yellow and '{city_name.upper()}' in bright cyan, plus 'MOST TOURISTS DON'T KNOW "
+                f"ABOUT' in white; rounded photo frames of {place_list}; vibrant, high contrast, 16:9."
+            )
+        logger.info(f"[Agent] Intro image prompt written (~{len(prompt.split())} words).")
+        return prompt
+
 
 @lru_cache
 def get_agent_service() -> AgentService:

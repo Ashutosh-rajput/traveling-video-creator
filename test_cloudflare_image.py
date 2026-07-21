@@ -34,9 +34,8 @@ import requests
 
 MODELS = {
     "flux": "@cf/black-forest-labs/flux-1-schnell",
-    "sdxl": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-    "sdxl-lightning": "@cf/bytedance/stable-diffusion-xl-lightning",
-    "dreamshaper": "@cf/lykon/dreamshaper-8-lcm",
+    "flux2-klein": "@cf/black-forest-labs/flux-2-klein-9b",
+    "leonardo": "@cf/leonardo/phoenix-1.0",
 }
 
 
@@ -51,20 +50,33 @@ def get_credentials():
     return account_id, api_token
 
 
+# Models that require multipart/form-data instead of a plain JSON body
+MULTIPART_MODELS = {
+    "@cf/black-forest-labs/flux-2-dev",
+    "@cf/black-forest-labs/flux-2-klein-4b",
+    "@cf/black-forest-labs/flux-2-klein-9b",
+}
+
+
 def generate_image(account_id, api_token, model_id, prompt, out_dir):
     print(f"\n--- Testing model: {model_id} ---")
     print(f"Prompt: {prompt}")
 
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model_id}"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {"prompt": prompt}
-
     start = time.time()
+
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if model_id in MULTIPART_MODELS:
+            headers = {"Authorization": f"Bearer {api_token}"}
+            # requests sets the multipart boundary automatically when 'files' is used
+            form_data = {"prompt": (None, prompt), "width": (None, "1024"), "height": (None, "1024")}
+            resp = requests.post(url, headers=headers, files=form_data, timeout=90)
+        else:
+            headers = {
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json",
+            }
+            resp = requests.post(url, headers=headers, json={"prompt": prompt}, timeout=60)
     except requests.RequestException as e:
         print(f"FAILED (network error) after {time.time() - start:.1f}s: {e}")
         return
@@ -119,6 +131,42 @@ def list_models():
     print("\nFull catalog: https://developers.cloudflare.com/workers-ai/models/?task=text-to-image")
 
 
+def list_remote_models(account_id, api_token):
+    print("Querying Cloudflare for text-to-image models available to your account...\n")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/models/search"
+    headers = {"Authorization": f"Bearer {api_token}"}
+    params = {"task": "Text-to-Image"}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+    except requests.RequestException as e:
+        print(f"Network error: {e}")
+        return
+
+    if resp.status_code != 200:
+        print(f"FAILED — HTTP {resp.status_code}")
+        print(resp.text[:1000])
+        return
+
+    data = resp.json()
+    if not data.get("success", False):
+        print(f"API returned success=false. Errors: {data.get('errors')}")
+        return
+
+    results = data.get("result", [])
+    if not results:
+        print("No text-to-image models returned.")
+        return
+
+    for model in results:
+        name = model.get("name", "unknown")
+        description = model.get("description", "")
+        print(f"  {name}")
+        if description:
+            print(f"      {description[:100]}")
+    print(f"\nTotal: {len(results)} model(s)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test Cloudflare Workers AI image generation")
     parser.add_argument("--model", choices=list(MODELS.keys()), default="flux", help="Model to test (default: flux)")
@@ -129,7 +177,12 @@ def main():
     )
     parser.add_argument("--all", action="store_true", help="Test all configured models in sequence")
     parser.add_argument("--out-dir", default="./cloudflare_image_output", help="Directory to save generated images")
-    parser.add_argument("--list-models", action="store_true", help="List available model shortcuts and exit")
+    parser.add_argument("--list-models", action="store_true", help="List configured model shortcuts and exit")
+    parser.add_argument(
+        "--list-remote",
+        action="store_true",
+        help="Query Cloudflare API for all text-to-image models available to your account, then exit",
+    )
     args = parser.parse_args()
 
     if args.list_models:
@@ -137,6 +190,10 @@ def main():
         return
 
     account_id, api_token = get_credentials()
+
+    if args.list_remote:
+        list_remote_models(account_id, api_token)
+        return
 
     if args.all:
         for model_id in MODELS.values():

@@ -17,7 +17,8 @@ import {
   FileText,
   Layers,
   Cloud,
-  Upload
+  Upload,
+  Image as ImageIcon
 } from 'lucide-react';
 import './App.css';
 
@@ -111,6 +112,13 @@ function App() {
   const [lightboxItem, setLightboxItem] = useState(null);
   const [selectedMedia, setSelectedMedia] = useState({}); // { attractionLabel: [asset1, asset2] }
   const [uploadingLabel, setUploadingLabel] = useState(null); // attraction currently uploading custom media
+
+  // Intro title: 'text' = static PIL poster (default), 'image' = AI banner.
+  const [introMode, setIntroMode] = useState('text');
+  const [introImageUrl, setIntroImageUrl] = useState('');
+  const [introImagePrompt, setIntroImagePrompt] = useState('');
+  const [introImageLoading, setIntroImageLoading] = useState(false);
+  const [introModalOpen, setIntroModalOpen] = useState(false);
   
   // Google Drive upload states
   const [gdriveUploading, setGdriveUploading] = useState(false);
@@ -196,6 +204,8 @@ function App() {
     setVideoUrl(null);
     setVideoError(null);
     setVideoGenerating(false);
+    setIntroImageUrl('');
+    setIntroImagePrompt('');
 
     // Start chat timer
     setChatElapsed(0);
@@ -356,6 +366,43 @@ function App() {
     }
   };
 
+  // Ask Cloudflare (prompt written by Gemma) to generate an AI intro banner.
+  const handleGenerateIntroImage = async () => {
+    if (introImageLoading) return;
+    // Unique attraction names, excluding the city label used for the intro media.
+    const cityLc = (query || '').trim().toLowerCase();
+    const places = Array.from(new Set([
+      ...videos.map(v => v.label),
+      ...pics.map(p => p.label),
+    ])).filter(Boolean).filter(l => l.trim().toLowerCase() !== cityLc);
+
+    setIntroImageLoading(true);
+    try {
+      const res = await fetch(buildUrl('/api/v1/chat/generate-intro-image'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          city_name: query,
+          places,
+          num_places: numPlaces,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to generate intro image.');
+      }
+      const data = await res.json();
+      setIntroImageUrl(data.url || '');
+      setIntroImagePrompt(data.prompt || '');
+      setIntroMode('image'); // auto-select the freshly generated image
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Failed to generate intro image.');
+    } finally {
+      setIntroImageLoading(false);
+    }
+  };
+
   const handleGDriveUpload = async () => {
     setGdriveUploading(true);
     setGdriveError(null);
@@ -373,7 +420,7 @@ function App() {
       } catch (err) {
         console.error("Failed to poll upload status", err);
       }
-    }, 2000);
+    }, 30000);
 
     try {
       const res = await fetch(buildUrl('/api/v1/chat/upload-gdrive'), {
@@ -602,7 +649,7 @@ function App() {
       } catch (err) {
         console.error("Failed to poll video generation status", err);
       }
-    }, 3000);
+    }, 5000);
     return pollInterval;
   };
 
@@ -946,6 +993,8 @@ function App() {
           transition_style: transitionStyle,
           transition_sound: transitionSound,
           caption_theme: captionTheme,
+          intro_mode: introMode,
+          intro_image_url: introImageUrl,
         }),
       });
 
@@ -1778,6 +1827,28 @@ function App() {
                     <p className="canvas-empty-desc">
                       The travel script narration and media assets have been gathered. Click compile below to render the final travel vlog!
                     </p>
+
+                    {/* Intro style selector */}
+                    <div style={{ marginBottom: '18px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '0.75rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        Intro Title (first 3s)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIntroModalOpen(true)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '8px',
+                          fontSize: '0.85rem', padding: '8px 16px', borderRadius: '8px',
+                          border: '1px solid rgba(168, 85, 247, 0.4)',
+                          background: 'rgba(168, 85, 247, 0.12)', color: '#c084fc',
+                          cursor: 'pointer', fontWeight: '600',
+                        }}
+                      >
+                        <ImageIcon size={14} />
+                        <span>{introMode === 'image' && introImageUrl ? 'Intro: AI Image ✓' : 'Intro: Static Text'} — Customize</span>
+                      </button>
+                    </div>
+
                     <button
                       type="button"
                       onClick={handleGenerateVideo}
@@ -2542,6 +2613,115 @@ function App() {
             ) : (
               <video src={lightboxItem.url} controls autoPlay className="lightbox-media" />
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Intro Title Style Modal */}
+      {introModalOpen && (
+        <div
+          onClick={() => setIntroModalOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(2, 6, 23, 0.8)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000, padding: '20px',
+          }}
+        >
+          <div
+            className="glass-card"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%', maxWidth: '560px', maxHeight: '88vh', overflowY: 'auto',
+              padding: '24px', background: 'rgba(15, 23, 42, 0.96)',
+              border: '1px solid var(--border-glass)', borderRadius: '14px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: '700', color: '#e2e8f0' }}>Intro Title (first 3 seconds)</h3>
+              <button type="button" onClick={() => setIntroModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Option: Static text */}
+            <button
+              type="button"
+              onClick={() => setIntroMode('text')}
+              style={{
+                width: '100%', textAlign: 'left', marginBottom: '12px', padding: '14px',
+                borderRadius: '10px', cursor: 'pointer',
+                border: introMode === 'text' ? '2px solid #38bdf8' : '1px solid var(--border-glass)',
+                background: introMode === 'text' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(2, 6, 23, 0.4)',
+                color: '#e2e8f0',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '700' }}>
+                <FileText size={16} /> Static Text Poster {introMode === 'text' && '✓'}
+              </div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Bold "TOP {numPlaces} PLACES IN {(query || '...').toUpperCase()}" text. Instant, no API needed.
+              </div>
+            </button>
+
+            {/* Option: AI image */}
+            <div
+              style={{
+                padding: '14px', borderRadius: '10px',
+                border: introMode === 'image' ? '2px solid #c084fc' : '1px solid var(--border-glass)',
+                background: introMode === 'image' ? 'rgba(168, 85, 247, 0.1)' : 'rgba(2, 6, 23, 0.4)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '700', color: '#e2e8f0' }}>
+                <ImageIcon size={16} /> AI-Generated Banner {introMode === 'image' && introImageUrl && '✓'}
+              </div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Gemma writes a prompt from your places and Cloudflare generates a banner image. Shown full-screen for 3s.
+              </div>
+
+              <button
+                type="button"
+                onClick={handleGenerateIntroImage}
+                disabled={introImageLoading}
+                style={{
+                  marginTop: '12px', display: 'flex', alignItems: 'center', gap: '8px',
+                  fontSize: '0.85rem', padding: '8px 16px', borderRadius: '8px',
+                  border: '1px solid rgba(168, 85, 247, 0.4)', background: 'rgba(168, 85, 247, 0.15)',
+                  color: '#c084fc', cursor: introImageLoading ? 'not-allowed' : 'pointer', fontWeight: '600',
+                }}
+              >
+                {introImageLoading ? (
+                  <><Loader2 size={14} className="stage-spinner" /><span>Generating (~10-30s)...</span></>
+                ) : (
+                  <><Sparkles size={14} /><span>{introImageUrl ? 'Regenerate Image' : 'Generate Image'}</span></>
+                )}
+              </button>
+
+              {introImageUrl && (
+                <div style={{ marginTop: '12px' }}>
+                  <img
+                    src={introImageUrl}
+                    alt="AI intro preview"
+                    style={{ width: '100%', borderRadius: '8px', border: '1px solid var(--border-glass)', cursor: 'pointer' }}
+                    onClick={() => { setIntroMode('image'); }}
+                  />
+                  {introImagePrompt && (
+                    <details style={{ marginTop: '8px' }}>
+                      <summary style={{ fontSize: '0.75rem', color: '#94a3b8', cursor: 'pointer' }}>View prompt</summary>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: 1.5 }}>{introImagePrompt}</p>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIntroModalOpen(false)}
+              className="console-btn"
+              style={{ marginTop: '20px', width: '100%', padding: '10px' }}
+            >
+              Done
+            </button>
           </div>
         </div>
       )}
